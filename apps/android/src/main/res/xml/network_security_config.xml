@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- DSM (HTTP:5000), WebDAV over HTTP, FTP and SMB are plain-text protocols by
+     design. usesCleartextTraffic=false silently blocked them on Android 9+.
+     Cleartext is allowed, but the app warns the user in the login / connection
+     forms; HTTPS / FTPS / SFTP remain the recommended options. -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

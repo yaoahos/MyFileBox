@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Pure folder glyph (back sheet + tab + lower front sheet): nothing sticks
+     out of the top, so it cannot read as a printer feeding paper.
+     Bounding box x27..81 / y35..73 on the 108x108 viewport is centred on
+     (54,54): left/right margins are both 27 and top/bottom margins are both
+     35, i.e. symmetric about the centre (not four numerically equal margins).
+     Every anchor and curve control point stays inside the central
+     66dp-diameter safe circle (radius 33 about (54,54)). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Back sheet: raised tab on the upper left + full rounded body -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M27,39 C27,36.8 28.8,35 31,35 L51,35 L57,39 L77,39 C79.2,39 81,40.8 81,43 L81,69 C81,71.2 79.2,73 77,73 L31,73 C28.8,73 27,71.2 27,69 Z" />
+    <!-- Front sheet: same width, sits lower, aligned bottom = closed folder -->
+    <path
+        android:fillColor="#E0EDFF"
+        android:pathData="M27,45 L81,45 L81,69 C81,71.2 79.2,73 77,73 L31,73 C28.8,73 27,71.2 27,69 Z" />
+    <!-- Faint highlight along the front sheet top edge -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:fillAlpha="0.55"
+        android:pathData="M35,49 L73,49 L73,51 L35,51 Z" />
+    <!-- One very faint page-divider line, kept inside the silhouette -->
+    <path
+        android:fillColor="#A8C8F6"
+        android:pathData="M35,57 L61,57 L61,60 L35,60 Z" />
+</vector>

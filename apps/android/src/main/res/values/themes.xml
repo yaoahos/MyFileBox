@@ -1,0 +1,12 @@
+<resources>
+    <!-- Status/navigation bar icon appearance is now controlled ONLY by
+         AppRoot (DisposableEffect + LaunchedEffect on the dark flag).
+         A static windowLightStatusBar here overrode the dark theme and made
+         status bar icons nearly invisible on dark backgrounds. -->
+    <style name="Theme.MyFileBox" parent="android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowActionModeOverlay">true</item>
+    </style>
+</resources>

@@ -1,0 +1,218 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!--
+        网络状态是「切网自动重连」的前提：没有这条权限时
+        ConnectivityManager.registerDefaultNetworkCallback 会直接抛 SecurityException
+        （被 runCatching 吞掉），表现就是 WiFi→移动数据后完全没有回调，
+        群晖一直连不上，必须重启 App。ACCESS_NETWORK_STATE 是普通权限，安装即授予。
+    -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!--
+        流式播放（外部播放器 + 本机代理）需要 mediaPlayback 类型的前台服务：
+        没有它，播放器接管屏幕后本应用退到后台会被 ROM 掐断网络（MIUI 实测），
+        视频播十几秒就 Source error。
+    -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+
+    <!--
+        Android 11+ 的包可见性限制：不加 <queries> 时 queryIntentActivities 只能看到
+        很少几个系统应用，导致「打开方式」里已安装的音乐 / 视频 App 全部消失。
+        这里声明本应用需要查询「能处理 ACTION_VIEW / SEND 的应用」。
+    -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:mimeType="*/*" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.SEND" />
+            <data android:mimeType="*/*" />
+        </intent>
+    </queries>
+
+    <!--
+        不用 Android 13+ 的预测式返回：Compose 的 BackHandler 与部分 ROM
+        （MIUI 等）在页面刚切换的那一小段时间里会漏掉预测式返回手势，
+        表现是「左边缘滑不出返回，换右边滑一次之后才恢复」。
+        关掉后所有返回统一走传统 onBackPressed 回调，左右边缘手势都稳定生效。
+    -->
+    <application
+        android:name=".MyFileBoxApplication"
+        android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:requestLegacyExternalStorage="true"
+        android:usesCleartextTraffic="true"
+        android:networkSecurityConfig="@xml/network_security_config"
+        android:enableOnBackInvokedCallback="false"
+        android:theme="@style/Theme.MyFileBox">
+        <service
+            android:name=".TransferService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+        <service
+            android:name=".StreamService"
+            android:exported="false"
+            android:foregroundServiceType="mediaPlayback" />
+        <receiver
+            android:name=".TransferCancelReceiver"
+            android:exported="false" />
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.files"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+        <!--
+            启动入口改由 activity-alias 提供：MainActivity 自身不再挂 LAUNCHER。
+            「应用图标跟随主题色」只需在 alias 之间切换，targetActivity 永远
+            保持 enabled——禁用它的话部分 ROM 连 alias 也起不来。
+            默认启用 IconOriginal，图标与加这个功能之前完全一致。
+            注意：升级后启动组件名会变，部分桌面会重排图标 / 使旧快捷方式失效。
+        -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:windowSoftInputMode="adjustResize" />
+
+        <activity-alias
+            android:name=".IconOriginal"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher"
+            android:label="@string/app_name"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+        <activity-alias
+            android:name=".IconTint0"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_tint_0"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+        <activity-alias
+            android:name=".IconTint1"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_tint_1"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+        <activity-alias
+            android:name=".IconTint2"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_tint_2"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+        <activity-alias
+            android:name=".IconTint3"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_tint_3"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+        <activity-alias
+            android:name=".IconTint4"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_tint_4"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+        <activity-alias
+            android:name=".IconTint5"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_tint_5"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+        <activity-alias
+            android:name=".IconTint6"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_tint_6"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+        <activity-alias
+            android:name=".IconTint7"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_tint_7"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+        <activity-alias
+            android:name=".IconTint8"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_tint_8"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+    </application>
+</manifest>
+

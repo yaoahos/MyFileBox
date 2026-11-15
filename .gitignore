@@ -1,0 +1,39 @@
+# 本仓库根目录 = android/（Gradle 根工程），忽略规则都相对这里写。
+
+# ---- 构建产物 ----
+**/build/
+.gradle/
+.kotlin/
+local.properties
+*.apk
+*.aab
+*.ap_
+*.apks
+*.dex
+*.class
+output-metadata.json
+mapping.txt
+*.hprof
+
+# ---- 签名材料 ----
+signing/
+*.jks
+*.keystore
+keystore.properties
+
+# ---- 构建日志与临时文件 ----
+*.log
+*.part
+*.tmp
+__pycache__/
+*.pyc
+
+# ---- 开发期脚本与截图 ----
+tools/
+docs/screenshots/
+
+# ---- 工具与 IDE ----
+.idea/
+*.iml
+.DS_Store
+Thumbs.db
