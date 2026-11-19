@@ -125,4 +125,13 @@ class ReleaseNotesTest {
         assertTrue(notes.all { it.length <= 80 })
         assertTrue(conciseNotes("- ${"长".repeat(100)}").last().endsWith("…"))
     }
+
+    /** 「产品名 + 版本号」裸标题要丢弃，但不能误伤「适配 Android 15」这类普通条目。 */
+    @Test
+    fun productVersionTitleOnlyDropsAsciiTitle() {
+        assertTrue(conciseNotes("MyFileBox 1.1.0").isEmpty())
+        assertTrue(conciseNotes("MyFileBox v1.1.0").isEmpty())
+        assertEquals(listOf("适配 Android 15"), conciseNotes("适配 Android 15"))
+        assertEquals(listOf("兼容 Android 8.0"), conciseNotes("兼容 Android 8.0"))
+    }
 }

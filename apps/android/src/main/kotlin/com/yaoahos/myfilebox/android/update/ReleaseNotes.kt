@@ -70,6 +70,7 @@ private val DATE_ONLY = Regex("""^\d{4}[/-]\d{1,2}[/-]\d{1,2}$""")
 
 /**
  * 「产品名 + 版本号」的裸标题行，如 `MyFileBox 1.1.0`。
- * 只匹配整行就是这个结构；正常条目带「新增：/修复：」等冒号前缀，不会被误伤。
+ * 产品名限定 ASCII 字符，避免把「适配 Android 15」这类不带冒号前缀的正常条目
+ * 误判成标题丢掉。
  */
-private val PRODUCT_VERSION_LINE = Regex("""^[\p{L}\p{N} _.-]+\s+v?\d+(?:\.\d+){1,3}$""")
+private val PRODUCT_VERSION_LINE = Regex("""^[A-Za-z][A-Za-z0-9 ._-]*\s*v?\d+(?:\.\d+){1,3}$""")
