@@ -106,4 +106,23 @@ class ReleaseNotesTest {
         assertEquals(20, conciseNotes(raw).size)
         assertEquals(5, conciseNotes(raw, limit = 5).size)
     }
+
+    /** 1.1.0 实际发布正文：发现新版本弹窗必须和「更新日志」弹窗一样只显示纯条目。 */
+    @Test
+    fun releaseBody1110ShowsPlainEntriesOnly() {
+        val raw = """
+            MyFileBox 1.1.0
+
+            **2026/11/19 · 1.1.0**
+            - 新增：配置备份与 WebDAV 云同步，支持定时上传及跨设备恢复
+            - 修复：FTP 图片损坏、断点续传重复、重名覆盖与暂停后中断
+            - 修复：传输记录按文件逐条展示，点击文件夹进入目录、点击文件直接打开，支持按层级返回；超长路径自动省略，完成通知支持手动清除
+        """.trimIndent()
+        val notes = conciseNotes(raw)
+        assertEquals(3, notes.size)
+        assertTrue(notes.none { it.contains("**") || it.startsWith("- ") || it.contains("MyFileBox 1.1.0") })
+        // 每条都不超过上限；超长条目会被截断并带省略号。
+        assertTrue(notes.all { it.length <= 80 })
+        assertTrue(conciseNotes("- ${"长".repeat(100)}").last().endsWith("…"))
+    }
 }

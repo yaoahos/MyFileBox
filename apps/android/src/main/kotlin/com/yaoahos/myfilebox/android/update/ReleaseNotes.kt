@@ -29,6 +29,9 @@ fun conciseNotes(raw: String, limit: Int = Int.MAX_VALUE): List<String> =
         }
         // 发布说明首行是「日期 · 版本号」，和对话框自带的标题重复，直接丢掉。
         .filterNot { HEADING_LINE.matches(it) || DATE_ONLY.matches(it) }
+        // GitHub Release 的 name 字段（如「MyFileBox 1.1.0」）有时被手动写进正文，
+        // 对话框标题已经显示了版本，这行裸标题再出现一次纯属重复。
+        .filterNot { PRODUCT_VERSION_LINE.matches(it) }
         .take(limit)
         .map { line ->
             // 结果长度不超过 MAX_ENTRY_CHARS：留一位给省略号。
@@ -64,3 +67,9 @@ private val HEADING_LINE = Regex("""^\d{4}[/-]\d{1,2}[/-]\d{1,2}\s*[·\-—]?\s*
 
 /** 只有日期的一行。 */
 private val DATE_ONLY = Regex("""^\d{4}[/-]\d{1,2}[/-]\d{1,2}$""")
+
+/**
+ * 「产品名 + 版本号」的裸标题行，如 `MyFileBox 1.1.0`。
+ * 只匹配整行就是这个结构；正常条目带「新增：/修复：」等冒号前缀，不会被误伤。
+ */
+private val PRODUCT_VERSION_LINE = Regex("""^[\p{L}\p{N} _.-]+\s+v?\d+(?:\.\d+){1,3}$""")

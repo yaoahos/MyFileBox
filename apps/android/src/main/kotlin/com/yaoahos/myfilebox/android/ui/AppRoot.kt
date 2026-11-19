@@ -427,14 +427,26 @@ fun MyFileBoxApp(viewModel: AppViewModel) {
                             .heightIn(max = 380.dp)
                             .verticalScroll(rememberScrollState())
                     ) {
-                        Text(info.name, fontSize = 12.sp, color = MutedText)
-                        if (info.notes.isNotBlank()) {
+                        // Release 正文原样搬来时带 `**` 标题、`- ` 列表符和噪声行，必须过
+                        // conciseNotes 再逐条渲染，否则 markdown 记号直接露在弹窗里
+                        // （与「更新日志」弹窗表现也不一致）。
+                        val notes = com.yaoahos.myfilebox.android.update.conciseNotes(info.notes)
+                        if (notes.isEmpty()) {
                             Text(
-                                info.notes.take(1200),
+                                "本次更新主要是问题修复与稳定性优化。",
                                 fontSize = 12.sp,
-                                lineHeight = 17.sp,
+                                color = MutedText,
                                 modifier = Modifier.padding(top = 8.dp)
                             )
+                        } else {
+                            notes.forEach { line ->
+                                Text(
+                                    "· $line",
+                                    fontSize = 12.sp,
+                                    lineHeight = 17.sp,
+                                    modifier = Modifier.padding(top = 4.dp)
+                                )
+                            }
                         }
                         if (state.updateDownloading) {
                             Text(
@@ -459,7 +471,7 @@ fun MyFileBoxApp(viewModel: AppViewModel) {
                     TextButton(
                         enabled = !state.updateDownloading && info.apkUrl.isNotBlank(),
                         onClick = viewModel::downloadUpdate
-                    ) { Text(if (state.updateDownloading) "下载中…" else "下载并安装") }
+                    ) { Text(if (state.updateDownloading) "下载中…" else "立即更新") }
                 },
                 dismissButton = {
                     TextButton(onClick = viewModel::dismissUpdateDialog) { Text("稍后") }
