@@ -15,6 +15,7 @@ import java.net.URLEncoder
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.security.SecureRandom
 
 /**
  * 本机流式代理：把「需要认证的远程文件」包装成一个本地 http 地址。
@@ -92,12 +93,12 @@ object StreamProxy {
         Thread(r, "mfb-stream").apply { isDaemon = true }
     }
 
-    // 上游取数据的客户端：必须信任自签证书。
-    // 群晖 LAN 端点常见是 https://<内网IP>:5001 + 自签证书，DSM 仓库按用户开关决定是否
-    // 放行，而代理的存在意义恰恰是「替播放器消化自签上游」——若这里严格校验，握手直接
-    // 抛 SSLHandshakeException，表现为点了播放没有任何画面（真机 3.9.12 实测）。
-    // 只影响代理向上游的连接；对外仍是 127.0.0.1 明文回环，播放器侧不受影响。
-    private val client: OkHttpClient = run {
+    // 上游取数据的客户端：跟随「允许自签证书」开关，与 DSM 主客户端口径一致。
+    // 默认开关为 true（用户要求保持），此时信任自签——群晖 LAN 端点常见 https://<IP>:5001
+    // + 自签证书，严格校验会握手失败、点了播放没画面（真机 3.9.12 实测）。
+    // 用户在设置里关闭该开关后 configure(false) 切到严格校验；只影响代理向上游的连接，
+    // 对外仍是 127.0.0.1 明文回环，播放器侧不受影响。
+    private val insecureClient: OkHttpClient = run {
         val trust = object : javax.net.ssl.X509TrustManager {
             override fun checkClientTrusted(chain: Array<out java.security.cert.X509Certificate>?, authType: String?) = Unit
             override fun checkServerTrusted(chain: Array<out java.security.cert.X509Certificate>?, authType: String?) = Unit
@@ -110,9 +111,6 @@ object StreamProxy {
             .sslSocketFactory(ssl.socketFactory, trust)
             .hostnameVerifier { _, _ -> true }
             .connectTimeout(12, TimeUnit.SECONDS)
-            // 读超时 = 停流看门狗：只要数据在动就不会触发，一旦上游静默停流
-            // （MIUI 后台掐网的典型表现）6 秒就断开并走断点续传，比播放器缓冲
-            // 先耗尽快，播放器无感。播放器暂停时本端阻塞在 write()，不受影响。
             .readTimeout(6, TimeUnit.SECONDS)
             .writeTimeout(30, TimeUnit.SECONDS)
             .followRedirects(true)
@@ -120,8 +118,27 @@ object StreamProxy {
             .build()
     }
 
+    /** 关闭「允许自签证书」后使用：系统默认信任链 + 主机名校验，超时口径与上面一致。 */
+    private val strictClient: OkHttpClient = OkHttpClient.Builder()
+        .connectTimeout(12, TimeUnit.SECONDS)
+        .readTimeout(6, TimeUnit.SECONDS)
+        .writeTimeout(30, TimeUnit.SECONDS)
+        .followRedirects(true)
+        .followSslRedirects(true)
+        .build()
+
+    @Volatile
+    private var client: OkHttpClient = insecureClient
+
+    /** 由 ViewModel 初始化与设置变更时调用，让流代理与 DSM 仓库共用同一开关。 */
+    fun configure(allowSelfSigned: Boolean) {
+        client = if (allowSelfSigned) insecureClient else strictClient
+    }
+
     @Volatile
     private var server: ServerSocket? = null
+
+    private val SECURE_RANDOM = SecureRandom()
 
     @Volatile
     var port: Int = 0
@@ -132,7 +149,8 @@ object StreamProxy {
         ensureServer()
         // 只保留最近 32 个源：一次播放一个地址，旧地址留着只会占内存。
         if (routes.size >= 32) routes.keys.take(routes.size - 31).forEach { routes.remove(it) }
-        val key = System.nanoTime().toString(36) + Integer.toHexString(source.url.hashCode())
+        // 用密码学随机串做 key：nanoTime+url.hashCode 可预测，同机恶意应用能猜中地址直接读流。
+        val key = ByteArray(16).also { SECURE_RANDOM.nextBytes(it) }.joinToString("") { "%02x".format(it) }
         routes[key] = source
         val suffix = source.name.takeIf { it.isNotBlank() }?.let { safeSegment(it) }
         val url = if (suffix.isNullOrBlank()) "http://127.0.0.1:$port/s/$key"

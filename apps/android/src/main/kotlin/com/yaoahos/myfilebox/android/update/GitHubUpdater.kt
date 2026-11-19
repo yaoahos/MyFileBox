@@ -7,8 +7,8 @@ import java.net.URL
 
 /**
  * 通过 GitHub Releases API 检查并下载新版本。
- * 实现方式对齐 SafePassword 的 GitHubUpdater：限流 / 404 / 5xx / 坏内容分开提示，
- * 下载安装包前校验地址域名、ZIP 头与最小体积。
+ * 限流 / 404 / 5xx / 坏内容分开提示，下载安装包时逐跳校验域名、
+ * ZIP 头与最小体积。
  */
 object GitHubUpdater {
     const val REPO = "yaoahos/MyFileBox"
@@ -22,6 +22,9 @@ object GitHubUpdater {
 
     /** 安装包至少这么大；被劫持成错误页时不可能达到。 */
     private const val MIN_APK_BYTES = 512L * 1024L
+
+    /** GitHub 下载地址通常跳到 objects.githubusercontent.com，逐跳校验，最多允许 5 跳。 */
+    private const val MAX_REDIRECTS = 5
 
     /** 只允许从 GitHub 的域名取安装包。 */
     private val ALLOWED_HOSTS = listOf(
@@ -149,22 +152,47 @@ object GitHubUpdater {
         return ALLOWED_HOSTS.any { host.equals(it, ignoreCase = true) }
     }
 
+    /** 把 Location 解析成绝对地址；相对跳转与协议相对跳转都按 URL 规则处理。 */
+    internal fun resolveRedirect(base: String, location: String): String? =
+        runCatching { URL(URL(base), location).toString() }.getOrNull()
+
     /**
-     * 下载安装包。三道校验：地址必须 https 且落在 GitHub 域名下、
-     * 内容必须是 ZIP（APK 就是 zip，头两字节 "PK"）、体积不能小得离谱。
+     * 下载安装包。四道校验：每一跳地址都必须是 https 且落在 GitHub 域名下、
+     * 跳转次数受限、内容必须是 ZIP（APK 就是 zip，头两字节 "PK"）、体积不能小得离谱。
      */
     fun download(url: String, target: File, onProgress: (Int) -> Unit) {
-        if (!isAllowedDownloadUrl(url)) throw UpdateDownloadException("安装包地址无效")
-        val connection = (URL(url).openConnection() as HttpURLConnection).apply {
-            connectTimeout = 20_000
-            readTimeout = 60_000
-            instanceFollowRedirects = true
-            setRequestProperty("User-Agent", USER_AGENT)
-            setRequestProperty("Accept", "application/octet-stream")
-        }
-        try {
+        var current = url
+        var active: HttpURLConnection? = null
+        // 不能依赖 instanceFollowRedirects：那样只校验初始 URL，302 到任意域名都会放行。
+        for (hop in 0 until MAX_REDIRECTS) {
+            if (!isAllowedDownloadUrl(current)) throw UpdateDownloadException("安装包地址无效")
+            val connection = (URL(current).openConnection() as HttpURLConnection).apply {
+                connectTimeout = 20_000
+                readTimeout = 60_000
+                instanceFollowRedirects = false
+                setRequestProperty("User-Agent", USER_AGENT)
+                setRequestProperty("Accept", "application/octet-stream")
+            }
             val code = connection.responseCode
-            if (code !in 200..299) throw UpdateDownloadException("下载失败，HTTP $code")
+            if (code in 300..399) {
+                val location = connection.getHeaderField("Location")
+                connection.disconnect()
+                if (location.isNullOrBlank()) throw UpdateDownloadException("下载地址跳转无效")
+                val next = resolveRedirect(current, location)
+                    ?: throw UpdateDownloadException("下载地址跳转无效")
+                if (hop == MAX_REDIRECTS - 1) throw UpdateDownloadException("下载地址跳转次数过多")
+                current = next
+                continue
+            }
+            if (code !in 200..299) {
+                connection.disconnect()
+                throw UpdateDownloadException("下载失败，HTTP $code")
+            }
+            active = connection
+            break
+        }
+        val connection = active ?: throw UpdateDownloadException("下载地址跳转次数过多")
+        try {
             val total = connection.contentLengthLong
             target.parentFile?.mkdirs()
             var downloaded = 0L

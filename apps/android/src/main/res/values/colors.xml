@@ -1,21 +1,27 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- Ocean-blue adaptive icon backdrop. -->
-    <color name="ic_launcher_background">#1B6FD2</color>
-
     <!--
-        桌面启动图标的主题色档：由 core/IconTint.buckets 生成（保色相、提饱和、
-        按白色文件夹对比 3.2:1 收敛明度）。索引 N 对应 alias IconTintN。
-        改颜色请改 IconTint.soft() 后重新生成，不要在这里手调，否则
-        应用内图标的连续染色会和桌面分档慢慢走偏。
+        桌面启动图标的主题色档：由 core/IconTint.buckets 生成，与界面主色
+        seedToPrimary 同一套口径（保色相、饱和 0.22~0.68、对白底 4.5:1）。
+        16 个色相档每 22.5°，索引 N 对应当前 alias IconTintNV4，16 为近灰中性档。
+        改颜色请改 IconTint.themeTone() 后重新生成，并且必须同时换新的 alias/mipmap
+        版本后缀：桌面会按资源名缓存旧位图，只改这里的色值不会刷新图标。
     -->
-    <color name="icon_tint_0">#FFDE5454</color>
-    <color name="icon_tint_1">#FFAE8A21</color>
-    <color name="icon_tint_2">#FF5C9A1D</color>
-    <color name="icon_tint_3">#FF1FA13F</color>
-    <color name="icon_tint_4">#FF1D9A9A</color>
-    <color name="icon_tint_5">#FF5476DE</color>
-    <color name="icon_tint_6">#FF9954DE</color>
-    <color name="icon_tint_7">#FFDE54BC</color>
-    <color name="icon_tint_8">#FF828FA1</color>
+    <color name="icon_tint_0">#FFB42222</color>
+    <color name="icon_tint_1">#FFB45922</color>
+    <color name="icon_tint_2">#FF896D1A</color>
+    <color name="icon_tint_3">#FF687416</color>
+    <color name="icon_tint_4">#FF4B7E18</color>
+    <color name="icon_tint_5">#FF257E18</color>
+    <color name="icon_tint_6">#FF187E32</color>
+    <color name="icon_tint_7">#FF187E58</color>
+    <color name="icon_tint_8">#FF187E7E</color>
+    <color name="icon_tint_9">#FF227DB4</color>
+    <color name="icon_tint_10">#FF2247B4</color>
+    <color name="icon_tint_11">#FF3522B4</color>
+    <color name="icon_tint_12">#FF6B22B4</color>
+    <color name="icon_tint_13">#FFA222B4</color>
+    <color name="icon_tint_14">#FFB4228F</color>
+    <color name="icon_tint_15">#FFB42259</color>
+    <color name="icon_tint_16">#FF5A687D</color>
 </resources>

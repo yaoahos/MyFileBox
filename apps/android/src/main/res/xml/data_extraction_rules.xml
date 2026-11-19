@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Android 12（API 31）起 allowBackup 只管云备份，设备间迁移改由本文件控制。
+    应用保存的是 NAS 凭据与会话令牌，两类导出路径都显式排除，行为与
+    allowBackup="false" 的既有意图一致；低版本继续由 allowBackup 兜底。
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="root" />
+        <exclude domain="database" />
+        <exclude domain="sharedpref" />
+        <exclude domain="external" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="root" />
+        <exclude domain="database" />
+        <exclude domain="sharedpref" />
+        <exclude domain="external" />
+    </device-transfer>
+</data-extraction-rules>

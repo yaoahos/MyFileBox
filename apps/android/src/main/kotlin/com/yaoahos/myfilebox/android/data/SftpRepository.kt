@@ -31,17 +31,7 @@ class SftpRepository(private val knownHostsFile: File? = null) {
                 session.setConfig("StrictHostKeyChecking", "no")
             }
             session.connect(NetTimeouts.NET_CONNECT_MILLIS)
-            if (!alreadyKnown && known != null) {
-                runCatching {
-                    val hostKey = session?.hostKey
-                    if (hostKey != null) {
-                        val entry = "${connection.host} ${hostKey.type} ${hostKey.key}\n"
-                        val portEntry = if (connection.port > 0 && connection.port != 22)
-                            "[${connection.host}]:${connection.port} ${hostKey.type} ${hostKey.key}\n" else ""
-                        known.appendText(entry + portEntry)
-                    }
-                }
-            }
+            if (!alreadyKnown) rememberHostKey(session, connection, known)
             val channel = session.openChannel("sftp") as ChannelSftp
             channel.connect(NetTimeouts.NET_CONNECT_MILLIS)
             try {
@@ -104,9 +94,15 @@ class SftpRepository(private val knownHostsFile: File? = null) {
             if (connection.port > 0) connection.port else 22
         )
         session.setPassword(connection.password)
-        runCatching { knownHostsFile?.let { jsch.setKnownHosts(it.absolutePath) } }
-        session.setConfig("StrictHostKeyChecking", if (knownHostsFile?.exists() == true) "yes" else "no")
+        // Trust-on-first-use：与 withChannel 同口径——首次记住主机密钥，之后严格校验。
+        val known = knownHostsFile
+        val alreadyKnown = known?.exists() == true
+        if (alreadyKnown) {
+            runCatching { jsch.setKnownHosts(known!!.absolutePath) }
+        }
+        session.setConfig("StrictHostKeyChecking", if (alreadyKnown) "yes" else "no")
         session.connect(NetTimeouts.NET_CONNECT_MILLIS)
+        if (!alreadyKnown) rememberHostKey(session, connection, known)
         val channel = session.openChannel("sftp") as com.jcraft.jsch.ChannelSftp
         channel.connect(NetTimeouts.NET_CONNECT_MILLIS)
         // JSch 的 ChannelSftp.get(src, monitor, skip) 走的是协议层的偏移读取，
@@ -150,12 +146,19 @@ class SftpRepository(private val knownHostsFile: File? = null) {
 
     fun delete(connection: NetworkConnection, paths: List<String>): Boolean = runCatching {
         withChannel(connection) { channel ->
+            var allDone = true
+            // 逐项 try/catch：以前整批包在一个 runCatching 里，前面某个文件 stat 抛异常
+            // （权限、路径刚被改名）会让循环直接中断，排在它后面的一个都不删。
             paths.forEach { path ->
-                val attrs = runCatching { channel.stat(path) }.getOrNull()
-                if (attrs?.isDir == true) channel.rmdir(path) else channel.rm(path)
+                val ok = runCatching {
+                    val attrs = channel.stat(path)
+                    if (attrs.isDir) channel.rmdir(path) else channel.rm(path)
+                    true
+                }.getOrDefault(false)
+                if (!ok) allDone = false
             }
+            allDone
         }
-        true
     }.getOrDefault(false)
 
     /** 重命名文件（夹）：同目录内改名。 */
@@ -176,22 +179,41 @@ class SftpRepository(private val knownHostsFile: File? = null) {
     ): Boolean = runCatching {
         withChannel(connection) { channel ->
             ensureDirs(channel, destDir)
+            var allDone = true
+            // 逐项 try/catch：同 delete，单项 stat/权限失败不能中断同批其余条目。
             paths.forEach { path ->
-                val name = path.trimEnd('/').substringAfterLast('/')
-                val attrs = channel.stat(path)
-                if (attrs.isDir) return@forEach
-                val tmp = File.createTempFile("myfilebox-sftp-", ".tmp")
-                try {
-                    channel.get(path).use { input -> tmp.outputStream().use { input.copyTo(it) } }
-                    tmp.inputStream().use { input -> channel.put(input, "$destDir/$name") }
-                    if (move) channel.rm(path)
-                } finally {
-                    tmp.delete()
-                }
+                val ok = runCatching {
+                    val name = path.trimEnd('/').substringAfterLast('/')
+                    val attrs = channel.stat(path)
+                    if (!attrs.isDir) {
+                        val tmp = File.createTempFile("myfilebox-sftp-", ".tmp")
+                        try {
+                            channel.get(path).use { input -> tmp.outputStream().use { input.copyTo(it) } }
+                            tmp.inputStream().use { input -> channel.put(input, "$destDir/$name") }
+                            if (move) channel.rm(path)
+                        } finally {
+                            tmp.delete()
+                        }
+                    }
+                    true
+                }.getOrDefault(false)
+                if (!ok) allDone = false
             }
+            allDone
         }
-        true
     }.getOrDefault(false)
+
+    /** 首次连接后记住主机密钥，下次起 StrictHostKeyChecking=yes 严格校验。 */
+    private fun rememberHostKey(session: Session?, connection: NetworkConnection, known: File?) {
+        if (known == null) return
+        runCatching {
+            val hostKey = session?.hostKey ?: return
+            val entry = "${connection.host} ${hostKey.type} ${hostKey.key}\n"
+            val portEntry = if (connection.port > 0 && connection.port != 22)
+                "[${connection.host}]:${connection.port} ${hostKey.type} ${hostKey.key}\n" else ""
+            known.appendText(entry + portEntry)
+        }
+    }
 
     private fun ensureDirs(channel: ChannelSftp, path: String) {
         val parts = path.trim('/').split('/').filter { it.isNotBlank() }

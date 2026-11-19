@@ -9,7 +9,6 @@ package com.yaoahos.myfilebox.android.update
  *   偶尔还混着安装说明、包名、校验值。
  *
  * 展示前统一过这里，界面只负责渲染「· 条目」，不再出现 markdown 记号。
- * 规则与 SafePassword 的更新日志对话框保持一致。
  */
 fun conciseNotes(raw: String, limit: Int = Int.MAX_VALUE): List<String> =
     raw.lineSequence()

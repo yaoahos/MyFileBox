@@ -58,8 +58,10 @@ private fun buildClient(
 ): OkHttpClient = OkHttpClient.Builder()
     .apply {
         if (insecure) {
-            // Only used when the user explicitly enables "允许自签名证书".
-            // Certificate and hostname checks stay ON by default.
+            // 「允许自签名证书」开关默认开启（群晖 LAN 的 https://<IP>:5001 普遍自签，
+            // 严格校验会导致连不上）。此处的放行只用于本仓库自己构建的 OkHttpClient，
+            // 不安装到 JVM 全局：系统 WebView / 其他组件仍走默认校验。
+            // 用户在设置里关掉开关后，新构建的 client 不进入这个分支，恢复严格校验。
             val trust = object : X509TrustManager {
                 override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) = Unit
                 override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) = Unit
@@ -454,20 +456,12 @@ class DsmRepository {
                     val json = asJson(text)
                     if (!json.optBoolean("success")) {
                         val err = dsmError(json)
-                        android.util.Log.w(
-                            "MFB-DSM",
-                            "login synoToken=$askSynoToken → fail code=$lastErrorCode base=$base"
-                        )
                         return@use DsmLoginResult(false, null, err)
                     }
                     val data = json.optJSONObject("data")
                     val sid = data?.optString("sid").orEmpty()
                     if (sid.isBlank()) return@use DsmLoginResult(false, null, "登录成功但未返回 SID")
                     val token = data?.optString("synotoken").orEmpty()
-                    android.util.Log.w(
-                        "MFB-DSM",
-                        "login synoToken=$askSynoToken → ok sid=[$sid] token=[$token] base=$base"
-                    )
                     DsmLoginResult(true, sid, null, token)
                 }
             }.getOrElse { DsmLoginResult(false, null, friendlyNetError(it, "网络连接失败")) }
@@ -487,13 +481,6 @@ class DsmRepository {
 
     suspend fun shares(session: Session): List<ShareFolder> = withContext(Dispatchers.IO) {
         val json = runCatching { api(session, "SYNO.FileStation.List", "2", "list_share") }
-            .onFailure {
-                android.util.Log.w(
-                    "MFB-DSM",
-                    "shares failed: ${it.javaClass.simpleName}: ${it.message} code=$lastErrorCode " +
-                        "tokenLen=${session.synoToken.length}"
-                )
-            }
             .getOrNull() ?: return@withContext emptyList()
         val arr = json.optJSONObject("data")?.optJSONArray("shares") ?: JSONArray()
         (0 until arr.length()).mapNotNull { index ->
@@ -659,7 +646,6 @@ class DsmRepository {
             throw e
         } catch (e: Throwable) {
             lastError = "下载失败：${friendlyNetError(e, "网络异常")}"
-            android.util.Log.w("MFB-DSM", "download ${e.javaClass.simpleName}: ${e.message} path=$path")
             false
         }
     }
@@ -723,12 +709,6 @@ class DsmRepository {
         // Cookie 不参与 URL 重写，是跨通道最稳的一条认证路径。
         // 上传专用：读超时压到 15s。DSM 遇到不认识的参数组合会一直不返回，
         // 用全局 30s 的话四组试完要两分钟。
-        android.util.Log.w(
-            "MFB-DSM",
-            "upload start sid=[${session.sid}] len=${session.sid.length} " +
-                "plus=${session.sid.contains('+')} slash=${session.sid.contains('/')} eq=${session.sid.contains('=')} " +
-                "pct=${session.sid.contains('%')} path=$destDir"
-        )
         val uploadClient = client.newBuilder()
             .readTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
             .build()
@@ -816,16 +796,10 @@ class DsmRepository {
                 val tag = "v$version token=${session.synoToken.isNotBlank()}"
                 if (json == null) {
                     lastError = "群晖返回网页而非 DSM 数据，请检查地址或通道"
-                    android.util.Log.w("MFB-DSM", "upload $tag → NOT JSON (http=${response.code})")
                     false
                 } else {
                     val ok = json.optBoolean("success")
                     val code = json.optJSONObject("error")?.optInt("code", -1) ?: -1
-                    android.util.Log.w(
-                        "MFB-DSM",
-                        "upload $tag → success=$ok code=$code http=${response.code} " +
-                            "path=$destDir base=$base cost=${System.currentTimeMillis() - started}ms bytes=${body.contentLength()}"
-                    )
                     if (!ok) {
                         lastErrorCode = code
                         lastError = "群晖拒绝上传（错误码 $code）：${dsmError(json)}"
@@ -841,7 +815,6 @@ class DsmRepository {
             attempt("2")
         }.getOrElse {
             lastError = "上传请求失败：${friendlyNetError(it, "网络异常")}"
-            android.util.Log.w("MFB-DSM", "upload exception ${it.javaClass.simpleName}: ${it.message}")
             false
         }
     }

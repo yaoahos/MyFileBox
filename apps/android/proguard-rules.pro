@@ -4,6 +4,18 @@
 #       反射、JNI、序列化被误裁。风险库整包保留。
 # ============================================================
 
+# ---- Release 去掉 Debug 日志 ----
+# 只移除 v/d；i/w/e 保留，便于用户反馈传输/协议问题时定位。
+# Log.d 的参数里有 runCatching 读取 PackageManager 的调试探测，纯读无副作用，
+# 随日志一起被优化掉是安全的（不依赖它的返回值）。
+-assumenosideeffects class android.util.Log {
+    public static boolean isLoggable(java.lang.String, int);
+    public static int v(java.lang.String, java.lang.String);
+    public static int v(java.lang.String, java.lang.String, java.lang.Throwable);
+    public static int d(java.lang.String, java.lang.String);
+    public static int d(java.lang.String, java.lang.String, java.lang.Throwable);
+}
+
 # ---- 崩溃堆栈可读性（混淆后保留行号，配合 mapping.txt 还原） ----
 -keepattributes SourceFile,LineNumberTable
 -renamesourcefileattribute SourceFile
@@ -69,10 +81,12 @@
 -keep class net.engio.mbassy.** { *; }
 -dontwarn net.engio.mbassy.**
 
-# BouncyCastle：JCE Provider 内部按「算法名 → 类名字符串」反射查找，
-# 且 smbj 的 NTLM 摘要直接引用其 Digest 类型；改名会让 SMB 认证期崩溃。
-# 整包保留换稳定（体量可接受），与传输库同一策略。
--keep class org.bouncycastle.** { *; }
+# BouncyCastle：不由本 App 主动实例化 JCE Provider（源码无 addProvider / setProvider），
+# smbj 的 NTLM 认证走 light API，其可达的 BC 类型由 R8 静态引用链自动保留。
+# 此前整包 keep 把后量子（Picnic/lowmc）等数千个未用类一起打进 dex，实测：
+# 去掉整包 keep 后 dex 10.06MB → 6.27MB、APK 4.74MB → 3.26MB；
+# K20 Pro 真机已验证冷启动、SMB NTLM 列目录、群晖登录均正常（无 ClassNotFound）。
+# 仅保留警告豁免，抑制 bcprov 中可选依赖（JCE/JDBC）的缺失告警。
 -dontwarn org.bouncycastle.**
 
 # ============================================================
@@ -81,7 +95,6 @@
 -dontwarn okhttp3.**
 -dontwarn okio.**
 -dontwarn org.conscrypt.**
--dontwarn org.bouncycastle.**
 -dontwarn org.openjsse.**
 
 # ============================================================

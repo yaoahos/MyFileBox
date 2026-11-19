@@ -111,6 +111,22 @@ class GitHubUpdaterTest {
         assertTrue(GitHubUpdater.isAllowedDownloadUrl("https://github.com/a.apk#frag"))
     }
 
+    @Test
+    fun redirect_targetMustStillPassWhitelist() {
+        // GitHub 的真实跳转目标是 objects.githubusercontent.com，必须继续放行。
+        val allowed = GitHubUpdater.resolveRedirect(
+            "https://github.com/yaoahos/MyFileBox/releases/download/v1.0.1/a.apk",
+            "https://objects.githubusercontent.com/a.apk?token=1"
+        )
+        assertTrue(allowed != null && GitHubUpdater.isAllowedDownloadUrl(allowed))
+
+        // 自动跳转绕过白名单是高危路径：相对跳转与绝对跳转都要受同一规则约束。
+        val relative = GitHubUpdater.resolveRedirect("https://github.com/a.apk", "/evil.apk")
+        assertTrue(relative == "https://github.com/evil.apk" && GitHubUpdater.isAllowedDownloadUrl(relative))
+        val escaped = GitHubUpdater.resolveRedirect("https://github.com/a.apk", "https://evil.com/a.apk")
+        assertTrue(escaped != null && !GitHubUpdater.isAllowedDownloadUrl(escaped))
+    }
+
     // ---- releaseNotes：截断条数 ----
 
     @Test

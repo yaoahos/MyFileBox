@@ -25,12 +25,21 @@ object SecretVault {
     /** Never silently fall back to plaintext. Callers must handle encryption failure. */
     @Volatile var lastFailure: String? = null
 
+    // 冷启动连续解密 prefs / transfers / session / connections 时，原来每次都走
+    // KeyStore.getInstance().load().getKey()（一次 Keystore IPC）。密钥生成本身是常驻的，
+    // 缓存实例即可；若系统清除了别名，Cipher.init 会抛异常，此时 invalidate 重取。
+    @Volatile private var cachedKey: SecretKey? = null
+
+    private fun cachedOrNewKey(): SecretKey = cachedKey ?: synchronized(this) {
+        cachedKey ?: key().also { cachedKey = it }
+    }
+
     fun encrypt(value: String): String {
         if (value.isEmpty()) return value
         lastFailure = null
         return runCatching {
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-            cipher.init(Cipher.ENCRYPT_MODE, key())
+            cipher.init(Cipher.ENCRYPT_MODE, cachedOrNewKey())
             val encrypted = cipher.doFinal(value.toByteArray(Charsets.UTF_8))
             val payload = cipher.iv + encrypted
             PREFIX + Base64.encodeToString(payload, Base64.NO_WRAP)
@@ -50,9 +59,10 @@ object SecretVault {
             val iv = payload.copyOfRange(0, IV_BYTES)
             val ciphertext = payload.copyOfRange(IV_BYTES, payload.size)
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-            cipher.init(Cipher.DECRYPT_MODE, key(), GCMParameterSpec(TAG_BITS, iv))
+            cipher.init(Cipher.DECRYPT_MODE, cachedOrNewKey(), GCMParameterSpec(TAG_BITS, iv))
             String(cipher.doFinal(ciphertext), Charsets.UTF_8)
         }.getOrElse {
+            cachedKey = null
             lastFailure = "凭据解密失败：${it.message ?: "密钥已变更"}"
             ""
         }

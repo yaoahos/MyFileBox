@@ -1,4 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+    本应用是文件管理器，「打开本机文件」支持用户访问的任意外部存储路径，
+    「批量分享」也可能来自任意目录，因此 external-path 必须用 "." 覆盖外部存储根，
+    不能像普通 App 那样收窄到 Download/DCIM，否则功能直接坏掉。
+    风险边界：provider 自身 exported=false，且只通过 FLAG_GRANT_READ_URI_PERMISSION
+    临时授权给被选中的应用，不会把 URI 永久暴露给第三方。
+    cache-path 用于远端文件缓存后交给外部播放器。
+-->
 <paths xmlns:android="http://schemas.android.com/apk/res/android">
     <external-path name="external" path="." />
     <external-files-path name="external_files" path="." />

@@ -123,7 +123,7 @@ class WebDavRepository(
                     resp.code
                 }
             }.getOrElse { e ->
-                android.util.Log.w("MFB-DAV", "PROPFIND $url 异常 ${e.javaClass.name}: ${e.message}")
+                android.util.Log.w("MFB-DAV", "PROPFIND failed ${e.javaClass.name}")
                 // 连接层异常（DNS / 拒绝连接 / 超时）无从重试，直接抛给上层。
                 throw IllegalStateException(friendlyNetError(e, "无法连接该服务器"))
             }
@@ -154,7 +154,18 @@ class WebDavRepository(
         )
     }
 
-    suspend fun list(connection: NetworkConnection, url: String): List<FileEntry> = withContext(Dispatchers.IO) {
+    /**
+     * 列出目录内容。
+     *
+     * [allowMissing] 为真时把 404 当成「目录还不存在」返回空列表：配置同步的目录
+     * 是应用自己建的，首次使用（一次都还没上传）时它本来就不存在，此时报
+     * "HTTP 404" 只会让人以为同步坏了，实际要提示的是「云端还没有备份」。
+     */
+    suspend fun list(
+        connection: NetworkConnection,
+        url: String,
+        allowMissing: Boolean = false
+    ): List<FileEntry> = withContext(Dispatchers.IO) {
         val absolute = absoluteUrl(connection, url)
         val request = request(connection, absolute.trimEnd('/') + "/")
             .method("PROPFIND", propfindBody())
@@ -162,6 +173,7 @@ class WebDavRepository(
             .build()
         client.newCall(request).execute().use { response ->
             if (response.code !in 200..299) {
+                if (allowMissing && response.code == 404) return@use emptyList()
                 // 状态码本身就是结论：401/403/404 各自要做的事完全不同，
                 // 统一写成「HTTP 404」等于让用户自己去查表。
                 lastError = httpStatusHint("WebDAV 目录读取失败", response.code)
@@ -232,8 +244,65 @@ class WebDavRepository(
                 if (!response.isSuccessful) lastError = httpStatusHint("WebDAV 上传失败", response.code)
                 response.isSuccessful
             }
+        }.onFailure {
+            lastError = "WebDAV 上传异常：${friendlyNetError(it, "网络连接失败", host = connection.host)}"
         }.getOrDefault(false)
     }
+
+    /**
+     * 把一段内存字节 PUT 到连接根目录下的 [name]。
+     *
+     * 配置备份只有几 KB，不需要像上传文件那样做流式进度与断点；
+     * 走同一套 [request] / [ensureCollection] / 错误文案，行为与普通上传一致。
+     */
+    suspend fun putBytes(connection: NetworkConnection, name: String, bytes: ByteArray): Boolean =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val dir = base(connection)
+                ensureCollection(connection, dir)
+                val target = dir.trimEnd('/') + "/" + encodeSegment(name)
+                client.newCall(request(connection, target).put(bytes.toRequestBody(OCTET)).build())
+                    .execute().use { response ->
+                        if (!response.isSuccessful) {
+                            // 404 / 409 都是「目录这一层不对劲」：上面已经试过 MKCOL，
+                            // 还失败说明路径本身写错了或该位置不可写，得把路径回显出来，
+                            // 否则用户只看到一句「配置上传失败：路径不存在」无从下手。
+                            lastError = if (response.code == 404 || response.code == 409) {
+                                "配置上传失败：云端目录 ${connection.path} 不存在或不可写，" +
+                                    "请检查地址与路径"
+                            } else httpStatusHint("配置上传失败", response.code)
+                        }
+                        response.isSuccessful
+                    }
+            }.onFailure {
+                lastError = "配置上传异常：${friendlyNetError(it, "网络连接失败", host = connection.host)}"
+            }.getOrDefault(false)
+        }
+
+    /**
+     * 读取连接根目录下 [name] 的完整内容。
+     *
+     * 404 单独给出「云端还没有配置备份」：这是首次使用同步的正常状态，
+     * 不该和认证失败、网络异常混在同一句「HTTP 404」里。
+     */
+    suspend fun getBytes(connection: NetworkConnection, name: String): ByteArray? =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val target = base(connection).trimEnd('/') + "/" + encodeSegment(name)
+                client.newCall(request(connection, target).get().build()).execute().use { response ->
+                    if (!response.isSuccessful) {
+                        lastError = if (response.code == 404) "云端还没有配置备份"
+                        else httpStatusHint("配置下载失败", response.code)
+                        return@use null
+                    }
+                    response.body?.bytes()
+                }
+            }.onFailure {
+                lastError = "配置下载异常：${friendlyNetError(it, "网络连接失败", host = connection.host)}"
+            }.getOrNull()
+        }
+
+    private val OCTET = "application/octet-stream".toMediaType()
 
     /** 在 dirUrl 下新建一个文件夹；已存在（405）也视为成功。 */
     suspend fun createFolder(connection: NetworkConnection, dirUrl: String, name: String): Boolean =
@@ -249,6 +318,8 @@ class WebDavRepository(
                         }
                         response.isSuccessful || response.code == 405
                     }
+            }.onFailure {
+                lastError = "新建文件夹异常：${friendlyNetError(it, "网络连接失败", host = connection.host)}"
             }.getOrDefault(false)
         }
 
@@ -270,15 +341,23 @@ class WebDavRepository(
                     }
                     response.isSuccessful
                 }
+            }.onFailure {
+                lastError = "WebDAV 重命名异常：${friendlyNetError(it, "网络连接失败", host = connection.host)}"
             }.getOrDefault(false)
         }
 
     suspend fun delete(connection: NetworkConnection, urls: List<String>): Boolean = withContext(Dispatchers.IO) {
         runCatching {
-            urls.all { url ->
-                client.newCall(request(connection, absoluteUrl(connection, url)).delete().build())
-                    .execute().use { it.isSuccessful }
+            var allDone = true
+            // 同 SMB：不能用 all{} 短路，否则第一个 404 / 403 会让后面全部跳过。
+            urls.forEach { url ->
+                val ok = runCatching {
+                    client.newCall(request(connection, absoluteUrl(connection, url)).delete().build())
+                        .execute().use { it.isSuccessful || it.code == 404 }
+                }.getOrDefault(false)
+                if (!ok) allDone = false
             }
+            allDone
         }.getOrDefault(false)
     }
 
@@ -287,7 +366,9 @@ class WebDavRepository(
             runCatching {
                 val destDir = absoluteUrl(connection, destDirUrl)
                 ensureCollection(connection, destDir)
-                urls.all { raw ->
+                var allDone = true
+                // 不能用 all{} 短路：同 delete，第一项失败会让同批其余条目全部跳过。
+                urls.forEach { raw ->
                     val url = absoluteUrl(connection, raw)
                     val name = encodeSegment(url.trimEnd('/').substringAfterLast('/'))
                     val dest = destDir.trimEnd('/') + "/" + name
@@ -297,14 +378,25 @@ class WebDavRepository(
                         .header("Destination", dest)
                         .header("Overwrite", "F")
                         .build()
-                    client.newCall(request).execute().use { it.code in 200..299 }
+                    val ok = runCatching {
+                        client.newCall(request).execute().use { it.code in 200..299 }
+                    }.getOrDefault(false)
+                    if (!ok) allDone = false
                 }
+                allDone
+            }.onFailure {
+                lastError = "WebDAV 批量操作异常：${friendlyNetError(it, "网络连接失败", host = connection.host)}"
             }.getOrDefault(false)
         }
 
     /**
-     * 逐级 MKCOL 建目录。base() 中包含的路径视为服务器已存在的根，
-     * 只对它之后的层级发请求；405（已存在）与 2xx 都算成功。
+     * 逐级 MKCOL 建目录。base() 的上级层级视为服务器已存在的根，只对它及其之后的
+     * 层级发请求；405（已存在）与 2xx 都算成功。
+     *
+     * 注意最后一级（也就是 base 自己）必须发一次 MKCOL：同步使用的却是
+     * `/MyFileBox` 这种「应用自己创建」的目录，早先把 base 整个当成已存在的根，
+     * 结果 PUT 到一个不存在的目录，服务端回 409 Conflict——表现就是
+     * 「立即上传失败 / 同步开启不了」，而 PROPFIND 根目录却是通的。
      */
     private fun ensureCollection(connection: NetworkConnection, dirUrl: String) {
         val target = URI(dirUrl)
@@ -315,7 +407,7 @@ class WebDavRepository(
         var current = prefix
         segments.forEachIndexed { index, segment ->
             current = "$current/$segment"
-            if (index < rootSegments) return@forEachIndexed
+            if (index < rootSegments - 1) return@forEachIndexed
             runCatching {
                 client.newCall(request(connection, current).method("MKCOL", null).build())
                     .execute().use { /* 201 created / 405 exists -> 都视为就绪 */ }

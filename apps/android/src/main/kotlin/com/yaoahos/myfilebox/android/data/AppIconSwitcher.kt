@@ -11,6 +11,16 @@ import com.yaoahos.myfilebox.android.ui.theme.wallpaperSeedColor
 import com.yaoahos.myfilebox.core.IconTint
 
 private const val TAG = "MFB-ICON"
+private const val PALETTE_VERSION = 5
+
+/**
+ * 色档 alias 的版本后缀。桌面会按「组件名 + 图标资源名」缓存位图：改动
+ * colors.xml 里同名的 icon_tint_N 后，重新启用 IconTintN 仍会拿到旧颜色。
+ * 每次调整色值都要换一套新 alias / mipmap 名，并把旧名留在清理清单里。
+ * V3 起色值与界面主色同源（themeTone）；V4 把前景恢复为原始渐变立体文件夹
+ * （V3 重绘成纯白扁平块，图形变了，不是用户要的「优化」），故换名绕开桌面缓存。
+ */
+private const val TINT_ALIAS_SUFFIX = "V4"
 
 /**
  * 只有「目标确实启用」且「所有旧入口都禁用成功」才算这次切换完成。
@@ -21,6 +31,10 @@ private const val TAG = "MFB-ICON"
  */
 internal fun shouldMarkAliasApplied(targetEnabled: Boolean, disableFailures: Int): Boolean =
     targetEnabled && disableFailures == 0
+
+/** 色档色值升级后必须强制重切，哪怕目标 alias 名字与旧版完全相同。 */
+internal fun aliasPaletteChanged(storedVersion: Int): Boolean =
+    storedVersion != PALETTE_VERSION
 
 /**
  * 桌面启动图标的主题色切换。
@@ -45,13 +59,42 @@ object AppIconSwitcher {
     private const val PREFS_NAME = "myfilebox_prefs"
     private const val KEY_APPLIED_ALIAS = "app_icon_alias"
     private const val KEY_PENDING_ALIAS = "app_icon_alias_pending"
+    // 色档数量 / 色值变了就得强制重切一次：有的色相在新旧两套档位里索引相同、
+    // 颜色却不同，只比 alias 字符串会以为「已经应用」而一直留着旧颜色。
+    private const val KEY_ALIAS_PALETTE = "app_icon_alias_palette"
     private const val KEY_ICON_FOLLOWS = "theme_icon_follows"
     private const val KEY_DYNAMIC = "theme_dynamic"
     private const val CLASS_PREFIX = "com.yaoahos.myfilebox.android.Icon"
     private const val ORIGINAL = CLASS_PREFIX + "Original"
 
-    private val TINTS = (0 until IconTint.BUCKET_COUNT).map { CLASS_PREFIX + "Tint$it" }
-    private val ALL = listOf(ORIGINAL) + TINTS
+    private val TINTS =
+        (0 until IconTint.BUCKET_COUNT).map { CLASS_PREFIX + "Tint$it$TINT_ALIAS_SUFFIX" }
+    // 历代旧 alias 都必须逐个禁用，否则桌面可能同时留着新旧两版图标：
+    // 无后缀（9/17 档旧版）、V2（soft 亮色档）、V3（纯白扁平前景）都要禁用。
+    private val LEGACY_TINTS =
+        (0 until IconTint.BUCKET_COUNT).flatMap { i ->
+            listOf(
+                CLASS_PREFIX + "Tint$i",
+                CLASS_PREFIX + "Tint${i}V2",
+                CLASS_PREFIX + "Tint${i}V3"
+            )
+        }
+    private val ALL = listOf(ORIGINAL) + TINTS + LEGACY_TINTS
+
+    /**
+     * 切换 alias 的后台线程。
+     *
+     * 单线程 + 守护线程：切换本身不参与任何界面首帧，放主线程只会让冷启动和每次
+     * 退后台多出几十到几百毫秒。串行执行还能把连续多次 flush 合并成一次
+     * （后一次读到「已应用」就直接返回）。
+     */
+    private val iconWorker = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+        Thread(r, "mfb-icon-alias").apply { isDaemon = true }
+    }
+
+    /** 供单测锁定「主题色 → 桌面 alias」映射，避免新旧别名混用。 */
+    internal fun aliasFor(followsTheme: Boolean, primary: Int): String =
+        if (!followsTheme) ORIGINAL else TINTS[IconTint.bucket(primary)]
 
     /**
      * 登记这次应该使用的启动组件，不立即动系统组件状态。
@@ -59,10 +102,15 @@ object AppIconSwitcher {
      * @param primary 当前真正在用的主色（动态取色时来自壁纸，不是 prefs.accent）
      */
     fun request(context: Context, followsTheme: Boolean, primary: Int) {
-        val target = if (!followsTheme) ORIGINAL else TINTS[IconTint.bucket(primary)]
+        val target = aliasFor(followsTheme, primary)
         val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, 0)
-        val applied = prefs.getString(KEY_APPLIED_ALIAS, null)
         val editor = prefs.edit()
+        val paletteChanged = aliasPaletteChanged(prefs.getInt(KEY_ALIAS_PALETTE, 1))
+        if (paletteChanged) {
+            // 清掉「已应用」记忆，让下面的比较一定登记待办；flush 会按新色值重切。
+            editor.remove(KEY_APPLIED_ALIAS).putInt(KEY_ALIAS_PALETTE, PALETTE_VERSION)
+        }
+        val applied = if (paletteChanged) null else prefs.getString(KEY_APPLIED_ALIAS, null)
         if (target == applied) editor.remove(KEY_PENDING_ALIAS)
         else editor.putString(KEY_PENDING_ALIAS, target)
         editor.apply()
@@ -90,9 +138,20 @@ object AppIconSwitcher {
         if (!inForeground) flush(app)
     }
 
-    /** 由 MainActivity.onStop 调用：此时界面已不在前台，切换组件不会打断用户。 */
+    /** 由 MainActivity.onStop / Application.onCreate 调用：此时界面已不在前台。 */
     fun flush(context: Context) {
         val app = context.applicationContext
+        // 冷启动路径上同步做：读一次 SharedPreferences（要解析整份 XML）+ 最多 68 次
+        // setComponentEnabledSetting（PackageManager IPC），实测在低端机上能到几百毫秒。
+        // 它完全不参与首帧，没必要占着主线程——丢到单线程后台，多次调用天然串行合并。
+        iconWorker.execute {
+            runCatching { flushNow(app) }.onFailure {
+                Log.w(TAG, "切换桌面图标失败：${it.javaClass.simpleName}: ${it.message}")
+            }
+        }
+    }
+
+    private fun flushNow(app: Context) {
         val prefs = app.getSharedPreferences(PREFS_NAME, 0)
         val target = prefs.getString(KEY_PENDING_ALIAS, null) ?: return
         if (prefs.getString(KEY_APPLIED_ALIAS, null) == target) {

@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Android 11 及以下的备份规则。allowBackup="false" 已经关掉全部备份，
+    这里再显式写一遍，既满足 Android 12+ 新旧两套规则同时声明的要求，
+    也避免以后有人误开 allowBackup 时静默把凭据带出去。
+-->
+<full-backup-content>
+    <exclude domain="root" />
+    <exclude domain="database" />
+    <exclude domain="sharedpref" />
+    <exclude domain="external" />
+</full-backup-content>

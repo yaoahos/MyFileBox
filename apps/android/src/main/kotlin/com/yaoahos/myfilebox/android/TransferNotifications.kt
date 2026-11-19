@@ -92,6 +92,7 @@ object TransferNotifications {
     private fun verb(mode: TransferMode, status: TransferStatus): String {
         val action = if (mode == TransferMode.UPLOAD) "上传" else "下载"
         return when (status) {
+            TransferStatus.QUEUED -> "等待$action"
             TransferStatus.RUNNING -> "正在$action"
             TransferStatus.PAUSED -> "$action 已暂停"
             TransferStatus.SUCCESS -> "$action 完成"
@@ -117,6 +118,7 @@ object TransferNotifications {
             ((task.completed.toDouble() / task.total) * 100).toInt().coerceIn(0, 100)
         } else 0
         val stateText = when (task.status) {
+            TransferStatus.QUEUED -> "排队中…"
             TransferStatus.RUNNING -> when {
                 totalBytes > 0 -> "$percent% · ${formatBytes(task.completedBytes)} / ${formatBytes(totalBytes)}"
                 task.total > 1 -> "${task.completed} / ${task.total} 项"
@@ -157,6 +159,9 @@ object TransferNotifications {
      * 一分钟后就是上百条更新，国产 ROM（MIUI）会直接把该应用的通知判为「打扰」并静音，
      * 表现就是「通知栏里根本看不到进度」。这里限制 1s 且进度百分比变化才发。
      */
+    // 通知权限已由 canPost() 在入口处查过（POST_NOTIFICATIONS 未授予就直接返回），
+    // lint 不认识这个自定义封装，只看到 notify 前没有内联的 checkSelfPermission。
+    @Suppress("MissingPermission")
     @Synchronized
     fun update(context: Context, task: TransferTask) {
         if (task.quiet || !canPost(context)) return
@@ -178,17 +183,25 @@ object TransferNotifications {
     }
 
     /**
-     * 结束：把通知更新成「完成 / 失败」，点开就是打开那个文件。
+     * 结束：发一条独立的「完成 / 失败」通知，点开就是打开那个文件。
      *
-     * [useForegroundSlot] = true 时复用前台通知的 id：这是 MIUI 等 ROM 上唯一稳定可见的做法——
-     * 新建一条通知经常被「不重要通知」过滤掉，而**更新已有通知**不会。
-     * 只有同时还有别的任务在跑时才另开 id，避免把进行中的进度顶掉。
+     * 绝不复用前台通知那条（FOREGROUND_ID）：前台服务名下的通知用户划不掉、
+     * 「清除全部」也清不掉，完成通知挂在那个 id 上就会永远赖在通知栏。
+     * 所以结束通知一律用自己的 id，只把「进行中」保持常驻。
+     *
+     * [replacesProgress] = true 表示没有别的任务在跑，那条进度通知已经没用了：
+     * 顺手撤掉它，否则前台服务摘掉后它还会以「已完成」的样子留在栏里。
      */
-    fun notifyFinal(context: Context, task: TransferTask, useForegroundSlot: Boolean = false) {
+    // 同 update()：权限判断在 canPost()，lint 看不到封装内部的 checkSelfPermission。
+    @Suppress("MissingPermission")
+    fun notifyFinal(context: Context, task: TransferTask, replacesProgress: Boolean = false) {
         lastPosted.remove(task.id)
         if (task.quiet || !canPost(context)) return
-        val id = if (useForegroundSlot) FOREGROUND_ID else FINAL_ID_BASE + (task.id.hashCode() and 0x0FFF)
-        runCatching { NotificationManagerCompat.from(context).notify(id, build(context, task)) }
+        val id = FINAL_ID_BASE + (task.id.hashCode() and 0x0FFF)
+        runCatching {
+            NotificationManagerCompat.from(context).notify(id, build(context, task))
+            if (replacesProgress) NotificationManagerCompat.from(context).cancel(FOREGROUND_ID)
+        }
     }
 
     /** 直接移除通知（删除任务时用，不需要显示结果）。 */
@@ -205,15 +218,6 @@ object TransferNotifications {
             ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) ==
             PackageManager.PERMISSION_GRANTED
 
-    fun formatBytes(bytes: Long): String {
-        if (bytes <= 0L) return "0 B"
-        val units = arrayOf("B", "KB", "MB", "GB", "TB")
-        var value = bytes.toDouble()
-        var index = 0
-        while (value >= 1024 && index < units.lastIndex) {
-            value /= 1024
-            index++
-        }
-        return if (index == 0) "${value.toInt()} ${units[index]}" else String.format("%.1f %s", value, units[index])
-    }
+    /** 委托 core 的唯一口径，避免通知与列表/详情显示精度不一致。 */
+    fun formatBytes(bytes: Long): String = com.yaoahos.myfilebox.core.FileSizeFormat.format(bytes)
 }

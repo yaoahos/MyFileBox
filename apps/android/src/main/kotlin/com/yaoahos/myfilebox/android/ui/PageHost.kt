@@ -8,11 +8,14 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.compositionLocalOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.setValue
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
@@ -28,8 +31,9 @@ private const val PAGE_SHARES = "shares"
 private const val PAGE_SETTINGS = "settings"
 private const val PAGE_APPEARANCE = "appearance"
 private const val PAGE_ABOUT = "about"
-private const val PAGE_HOME = "home/"
-private const val PAGE_LOGIN = "login/"
+private const val PAGE_BACKUP_SYNC = "backupSync"
+internal const val PAGE_HOME = "home/"
+internal const val PAGE_LOGIN = "login/"
 private const val PAGE_TRANSFER = "transfer"
 
 /**
@@ -62,11 +66,15 @@ internal fun pageKeyOf(s: MyFileBoxState): String = when {
     s.screen == Screen.SETTINGS -> PAGE_SETTINGS
     s.screen == Screen.APPEARANCE -> PAGE_APPEARANCE
     s.screen == Screen.ABOUT -> PAGE_ABOUT
-    s.browser != null -> "$PAGE_BROWSER${s.browser.ctx}/${s.browser.localCategory.orEmpty()}/" +
-        "${s.browser.path}/${s.browser.title}/${s.browser.netId.orEmpty()}"
+    s.screen == Screen.BACKUP_SYNC -> PAGE_BACKUP_SYNC
+    s.browser != null -> browserKeyOf(s.browser)
     s.tab == TabKey.SYNO && (s.connectionEditing || s.session == null) -> "$PAGE_LOGIN${s.tab}"
     else -> "$PAGE_HOME${s.tab}"
 }
+
+/** 文件夹页的 pageKey：页面宿主与「跳转压栈」必须共用同一套拼法，方向才判得准。 */
+internal fun browserKeyOf(b: com.yaoahos.myfilebox.android.ui.BrowserState): String =
+    "$PAGE_BROWSER${b.ctx}/${b.localCategory.orEmpty()}/${b.path}/${b.title}/${b.netId.orEmpty()}"
 
 /**
  * 首页的滚动状态提到页面宿主层持有：页面进出 AnimatedContent 时不会重建，
@@ -80,15 +88,17 @@ private fun PageContent(
     key: String,
     s: MyFileBoxState,
     vm: AppViewModel,
-    listStates: Map<TabKey, LazyListState>
+    listStates: Map<TabKey, LazyListState>,
+    settingsListState: LazyListState
 ) = when {
     key.startsWith(PAGE_SEARCH) -> SearchScreen(s, vm)
     key.startsWith(PAGE_RECYCLE) -> RecycleScreen(s, vm)
     key == PAGE_SHARES -> ShareManagerScreen(s, vm)
     key == PAGE_TRANSFER -> TransferCenter(s, vm)
-    key == PAGE_SETTINGS -> SettingsScreen(s, vm)
+    key == PAGE_SETTINGS -> SettingsScreen(s, vm, settingsListState)
     key == PAGE_APPEARANCE -> AppearanceScreen(s, vm)
     key == PAGE_ABOUT -> AboutScreen(vm)
+    key == PAGE_BACKUP_SYNC -> BackupSyncScreen(s, vm)
     key.startsWith(PAGE_BROWSER) -> BrowserScreen(s, vm)
     else -> {
         val tab = if (key.startsWith(PAGE_HOME) || key.startsWith(PAGE_LOGIN)) {
@@ -125,11 +135,31 @@ fun PageHost(
     val stack = remember { PageStack() }
     // 三个底栏首页各持一份滚动状态，宿主常驻 → 页面重建也不丢滚动位置。
     val listStates = remember { TabKey.values().associateWith { LazyListState() } }
+    // 设置页的滚动状态同样常驻：从「关于 / 主题与外观 / 备份与同步」返回时留在原位。
+    val settingsListState = remember { LazyListState() }
+    var previousPageKey by remember { mutableStateOf("") }
+    LaunchedEffect(pageKey) {
+        // 只有在「从设置以外的页面进来」时才回到顶部——用户明确要求的是
+        // 「退出设置再进入要从头开始」，而不是「每次进出子页都被拽回去」。
+        val fromSubPage = previousPageKey == PAGE_ABOUT ||
+            previousPageKey == PAGE_APPEARANCE ||
+            previousPageKey == PAGE_BACKUP_SYNC
+        if (pageKey == PAGE_SETTINGS && !fromSubPage) settingsListState.scrollToItem(0)
+        previousPageKey = pageKey
+    }
 
-    // 只按页面 key 判定前进 / 返回，与层级、底栏、首页无关。
-    val pop = remember(pageKey) {
-        stack.update(pageKey)
-        stack.pop
+    // 底栏之间按左右顺序滑动（并重置回退栈），其它页面仍按真实回退栈判断前进 / 返回。
+    // 转场方向：跳转落到深页时，state 会带一条「首页/父级/目标」的完整链，
+    // 这里据此重建页面栈，保证进入是前进、逐级返回都是返回，不会因为目标 key
+    // 以前访问过就判成相反方向。链的归属 key 必须等于本次 pageKey，避免异步
+    // 状态下一次跳转的链被下一页误用；消费后由宿主清掉。
+    val pendingChain = liveState.pendingPageChain
+    val motion = remember(pageKey) {
+        val chainForThisPage = pendingChain.takeIf { it.isNotEmpty() && it.last() == pageKey }
+        resolvePageMotion(stack, pageKey, chainForThisPage)
+    }
+    LaunchedEffect(pageKey, pendingChain) {
+        if (pendingChain.isNotEmpty() && pendingChain.last() == pageKey) vm.consumePageChain()
     }
 
     // 系统返回（按键 / 手势 / 预测式返回）统一走这里，与 AppRoot 的 performBack 完全一致。
@@ -178,7 +208,7 @@ fun PageHost(
             targetState = pageKey,
             contentKey = { it },
             modifier = Modifier.fillMaxSize().clipToBounds().then(edgeBack),
-            transitionSpec = { pageTransition(pop) },
+            transitionSpec = { motionTransition(motion) },
             label = "page-motion"
         ) { key ->
             // 每个页面都铺一层不透明底色：有的页面根节点自带背景，有的没有
@@ -191,7 +221,8 @@ fun PageHost(
                     key,
                     if (key == pageKey) liveState else snapshots[key] ?: liveState,
                     vm,
-                    listStates
+                    listStates,
+                    settingsListState
                 )
             }
         }

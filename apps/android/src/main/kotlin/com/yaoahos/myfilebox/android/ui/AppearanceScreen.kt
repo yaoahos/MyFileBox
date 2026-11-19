@@ -44,6 +44,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.yaoahos.myfilebox.android.data.accentToHex
 import com.yaoahos.myfilebox.android.data.parseAccentHex
+import com.yaoahos.myfilebox.android.ui.theme.DynamicAccentState
+import com.yaoahos.myfilebox.android.ui.theme.LocalDynamicAccentState
 import com.yaoahos.myfilebox.android.ui.theme.wallpaperColorSupported
 import com.yaoahos.myfilebox.core.ThemeMode
 import java.util.Locale
@@ -56,7 +58,7 @@ import java.util.Locale
  * 都是 Tailwind 500/600 级的中明度色，配白字或深字都够对比度——
  * 具体用哪个由 Theme.kt 的 readableOn() 按亮度自动判断。
  */
-private val AccentPresets = listOf(
+internal val AccentPresets = listOf(
     0xFF1F6BFF, // 品牌蓝
     0xFF2563EB, // 深蓝
     0xFF0EA5E9, // 天蓝
@@ -78,6 +80,9 @@ private val AccentPresets = listOf(
     0xFF4F46E5, // 靛
     0xFF475569  // 石板
 )
+
+/** 动态取色失败时，回落的到底是预置色块还是自定义色值。 */
+internal fun isPresetAccent(accent: Long): Boolean = accent in AccentPresets
 
 /**
  * 色块统一用圆角方形，预置格和自定义颜色的预览块是同一种形状。
@@ -114,6 +119,13 @@ fun AppearanceScreen(state: MyFileBoxState, vm: AppViewModel) {
     // 12 以下没有系统取色接口，直接告诉用户为什么点不了，而不是给个灰色的谜语开关。
     // 门槛与 Theme / 壁纸监听共用 WallpaperSeed.kt 的 MIN_WALLPAPER_SDK，别再各写一份。
     val dynamicSupported = wallpaperColorSupported()
+    val dynamicAccentState = LocalDynamicAccentState.current
+    val followingWallpaper = theme.dynamic && dynamicSupported &&
+        dynamicAccentState == DynamicAccentState.FOLLOWING
+    // PENDING 还在读壁纸，不算「取不到」；只有明确 FALLBACK 才提示用户正在用哪种颜色。
+    val dynamicFallback = theme.dynamic && dynamicSupported &&
+        dynamicAccentState == DynamicAccentState.FALLBACK
+    val fallbackOnPreset = isPresetAccent(theme.accent)
 
     Column(
         Modifier
@@ -140,7 +152,7 @@ fun AppearanceScreen(state: MyFileBoxState, vm: AppViewModel) {
                             modifier = Modifier.padding(top = 7.dp)
                         )
                         Text(
-                            "「跟随系统」随手机深色模式自动切换。",
+                            "随系统深色模式自动切换。",
                             fontSize = 12.sp,
                             color = MutedText,
                             lineHeight = 16.sp,
@@ -176,8 +188,8 @@ fun AppearanceScreen(state: MyFileBoxState, vm: AppViewModel) {
                         Column(Modifier.weight(1f).padding(start = 11.dp)) {
                             Text("跟随桌面壁纸", fontSize = 12.sp, fontWeight = FontWeight.Medium)
                             Text(
-                                if (dynamicSupported) "读取系统从壁纸提取的主色"
-                                else "需要 Android 12 及以上",
+                                if (dynamicSupported) "取壁纸主色"
+                                else "需 Android 12 及以上",
                                 fontSize = 12.sp,
                                 color = MutedText,
                                 modifier = Modifier.padding(top = 1.dp)
@@ -190,7 +202,7 @@ fun AppearanceScreen(state: MyFileBoxState, vm: AppViewModel) {
                         )
                     }
                     Text(
-                        "开启后主色跟随桌面壁纸，忽略下方主题配色；关闭后恢复上次选的颜色。",
+                        "开启后主色随壁纸变化；系统未提供壁纸取色时，沿用下方自选配色。",
                         fontSize = 12.sp,
                         color = MutedText,
                         lineHeight = 16.sp,
@@ -218,7 +230,7 @@ fun AppearanceScreen(state: MyFileBoxState, vm: AppViewModel) {
                         Column(Modifier.weight(1f).padding(start = 11.dp)) {
                             Text("图标跟随主题色", fontSize = 12.sp, fontWeight = FontWeight.Medium)
                             Text(
-                                if (theme.iconFollowsTheme) "已按当前主题色柔和处理" else "保持原始蓝色图标",
+                                if (theme.iconFollowsTheme) "底色跟随当前色档" else "保持原始蓝色图标",
                                 fontSize = 12.sp,
                                 color = MutedText,
                                 modifier = Modifier.padding(top = 1.dp)
@@ -230,7 +242,7 @@ fun AppearanceScreen(state: MyFileBoxState, vm: AppViewModel) {
                         )
                     }
                     Text(
-                        "开启后应用内与桌面图标底色随主题色变化，颜色已降饱和处理；桌面图标按色相分档，切换后桌面可能重排图标或使旧快捷方式失效。",
+                        "桌面图标按色相分档；切换后可能重排图标或使旧快捷方式失效。",
                         fontSize = 12.sp,
                         color = MutedText,
                         lineHeight = 16.sp,
@@ -244,13 +256,20 @@ fun AppearanceScreen(state: MyFileBoxState, vm: AppViewModel) {
             item {
                 SettingsSection("主题配色") {
                     Column(Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
+                        // 只有「真的在跟随壁纸」时才不标记任何色块。开着动态取色却取不到
+                        // 壁纸色时，正在用哪个就在哪一组下面说明：预置色要标出那一块，
+                        // 自定义色则在下面的输入框区提示，别在这里说「选中的配色」。
                         AccentPresetGrid(
-                            selected = if (theme.dynamic) -1L else theme.accent,
+                            selected = if (followingWallpaper) -1L else theme.accent,
                             onPick = vm::setAccent
                         )
                         Text(
-                            if (theme.dynamic) "动态取色已开启，选择任意颜色会自动关闭动态取色。"
-                            else "点选即时生效。",
+                            when {
+                                followingWallpaper -> "选择色块即时生效，并关闭动态取色。"
+                                dynamicFallback && fallbackOnPreset ->
+                                    "当前壁纸取不到可用的颜色，正在沿用这个预置配色。"
+                                else -> "点选即时生效。"
+                            },
                             fontSize = 12.sp,
                             color = MutedText,
                             lineHeight = 16.sp,
@@ -336,14 +355,19 @@ fun AppearanceScreen(state: MyFileBoxState, vm: AppViewModel) {
                                 modifier = Modifier.padding(top = 6.dp)
                             )
                         }
+                        val customNote = if (theme.dynamic && dynamicSupported && !dynamicFallback) {
+                            // 色块默认显示壁纸色，一旦输入就切成输入值的预览；
+                            // 真正生效仍要点「应用」（写偏好 + 关掉动态取色）。
+                            "输入色值可即时预览；点「应用」生效，并关闭动态取色。"
+                        } else {
+                            "支持 #RRGGBB 与 RRGGBB，点「应用」生效。"
+                        }
                         Text(
-                            if (theme.dynamic && dynamicSupported) {
-                                // 色块默认显示壁纸色，一旦输入就切成输入值的预览；
-                                // 真正生效仍要点「应用」（写偏好 + 关掉动态取色）。
-                                "色块默认显示随壁纸变化的主色；输入色值可即时预览，点「应用」后生效并关闭动态取色。"
-                            } else {
-                                "输入色值即时预览，点「应用」后生效。支持 #RRGGBB 与 RRGGBB。"
-                            },
+                            // 回落到自定义色时，把「为什么色块没跟着壁纸走」说明放在这里，
+                            // 跟它解释的对象（下面的输入框）待在一起。
+                            if (dynamicFallback && !fallbackOnPreset) {
+                                "当前壁纸取不到可用的颜色，正在沿用这个自选颜色。\n$customNote"
+                            } else customNote,
                             fontSize = 12.sp,
                             color = MutedText,
                             lineHeight = 16.sp,
@@ -355,7 +379,7 @@ fun AppearanceScreen(state: MyFileBoxState, vm: AppViewModel) {
 
             item {
                 Text(
-                    "主题色用于按钮、开关、选中态、底栏高亮与刷新图标；开启后应用图标也跟随；页面底色随深浅模式自动重算。",
+                    "主题色用于按钮、开关、选中态与底栏高亮；页面底色随深浅模式自动重算。",
                     fontSize = 12.sp,
                     color = MutedText,
                     lineHeight = 17.sp,

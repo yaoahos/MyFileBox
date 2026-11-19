@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<lint>
+    <!--
+        这张整图已无代码引用，但用户明确要求保留原版渐变立体图标作为资产。
+        可见图标走的是 ic_launcher_bg + ic_launcher_folder_fg，勿据此删除本图。
+    -->
+    <issue id="UnusedResources">
+        <ignore path="src/main/res/drawable-nodpi/ic_app_icon.png" />
+    </issue>
+</lint>

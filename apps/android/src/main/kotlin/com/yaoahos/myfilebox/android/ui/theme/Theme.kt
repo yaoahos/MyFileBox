@@ -3,14 +3,14 @@ package com.yaoahos.myfilebox.android.ui.theme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.dynamicDarkColorScheme
-import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.produceState
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.compositeOver
 import androidx.compose.ui.graphics.luminance
@@ -29,6 +29,39 @@ private val LightBackground = Color(0xFFF1F5FC)
 internal val DarkBackground = Color(0xFF0B1220)
 private val DarkSurface = Color(0xFF121C2C)
 
+/**
+ * 动态取色此刻的实际结果，供外观页决定「预置配色该不该显示为选中」。
+ *
+ * 关键是 [FALLBACK]：开关是打开的，但壁纸色取不到（ROM 只给黑色 / 动态壁纸没实现
+ * 取色 / IPC 异常），界面实际用的是自选配色。这时如果预置色块全都不选中，用户会
+ * 以为「配色丢了」——把正在生效的那一块标出来才对得上眼睛看到的东西。
+ */
+enum class DynamicAccentState {
+    /** 首帧还没读完壁纸色，先不做任何标记，避免闪一下再跳。 */
+    PENDING,
+
+    /** 真的在跟随壁纸，预置色块全部不选中。 */
+    FOLLOWING,
+
+    /** 取不到壁纸色，已回落自选配色；预置色块按 accent 选中。 */
+    FALLBACK
+}
+
+val LocalDynamicAccentState = staticCompositionLocalOf { DynamicAccentState.FALLBACK }
+
+/** 壁纸色的三种状态：读到了 / 读不到 / 还没读完。 */
+private sealed interface SeedState {
+    data object Pending : SeedState
+    data object Unusable : SeedState
+    data class Ready(val color: Color) : SeedState
+}
+
+private fun seedStateOf(seed: Color?): SeedState =
+    if (seed == null) SeedState.Unusable else SeedState.Ready(seed)
+
+// lint 认为下面的 produceState 没有赋值：它在 `return@produceState` 之后才赋值，
+// 而前置分支（不支持动态取色）也确实提前 return 了。两种写法都赋过值，属于误报。
+@Suppress("ProduceStateDoesNotAssignValue")
 @Composable
 fun MyFileBoxTheme(
     accent: Long = 0xFF1F6BFF,
@@ -46,17 +79,19 @@ fun MyFileBoxTheme(
     // 订阅壁纸色变化：前台换壁纸（分屏 / 悬浮窗）也能立刻更新，不用等 Activity resume。
     // key 里带 dynamicSupported，拨开关的那一帧就重新取初值，不会出现「开了动态
     // 取色却还拿着关闭时算出的 null」。
-    val seed by produceState<Color?>(null, context, dynamicSupported) {
+    val seedState by produceState<SeedState>(SeedState.Pending, context, dynamicSupported) {
         if (!dynamicSupported) {
-            value = null
+            value = SeedState.Unusable
             return@produceState
         }
         // getWallpaperColors 会走 IPC，AOSP 明确不建议在 UI 线程调用；首帧的两次
         // 读取统一放 IO，避免放宽到 12/13 后拖慢低端机启动。
-        value = withContext(Dispatchers.IO) { wallpaperSeedColor(context) }
+        value = seedStateOf(withContext(Dispatchers.IO) { wallpaperSeedColor(context) })
         withContext(Dispatchers.IO) { WallpaperColorBus.refresh(context) }
         WallpaperColorBus.seed.collect { latest ->
-            value = latest ?: withContext(Dispatchers.IO) { wallpaperSeedColor(context) }
+            value = seedStateOf(
+                latest ?: withContext(Dispatchers.IO) { wallpaperSeedColor(context) }
+            )
         }
     }
     // 部分 ROM 不发 OnColorsChanged 回调，回前台再兜底重读一次。
@@ -71,16 +106,29 @@ fun MyFileBoxTheme(
     // 这样即便 ROM 算出壁纸色却不更新 accent overlay（HyperOS 3 实测），
     // 主色也仍然跟着壁纸走。
     // 委托属性不能智能转非空，先取一次快照再进 when。
-    val effectiveSeed = seed
-    val scheme = when {
-        effectiveSeed != null -> {
-            val wallpaperPrimary = seedToPrimary(effectiveSeed, darkTheme)
-            if (darkTheme) darkScheme(wallpaperPrimary) else lightScheme(wallpaperPrimary)
+    val effectiveSeed = (seedState as? SeedState.Ready)?.color
+    // 只有真正拿到可用的壁纸色才跟随壁纸。读不到时（部分 ROM 的 WallpaperColors
+    // 直接返回黑色，系统 overlay 也随之派生出一片灰蓝）就老老实实用自选配色——
+    // 之前会退到 dynamicLightColorScheme，结果整屏是"来路不明的灰"，
+    // 用户看到的是"深蓝壁纸却是灰界面"，比不跟随更糟。
+    //
+    // 派生配色是纯计算（种子 → 主色 → 30 多个 scheme 槽位），但它挂在整棵 UI 的根上，
+    // 任何一次重组都会重跑。用 remember 绑住三个输入，滚动/展开这类重组不再白算一遍。
+    val scheme = remember(effectiveSeed, darkTheme, accentColor) {
+        when {
+            effectiveSeed != null -> {
+                val wallpaperPrimary = seedToPrimary(effectiveSeed, darkTheme)
+                if (darkTheme) darkScheme(wallpaperPrimary) else lightScheme(wallpaperPrimary)
+            }
+            darkTheme -> darkScheme(accentColor)
+            else -> lightScheme(accentColor)
         }
-        dynamicSupported ->
-            if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
-        darkTheme -> darkScheme(accentColor)
-        else -> lightScheme(accentColor)
+    }
+    // 外观页据此标记预置配色：跟随壁纸时不选，回落自选色时选中正在用的那一块。
+    val dynamicAccentState = when {
+        seedState is SeedState.Ready -> DynamicAccentState.FOLLOWING
+        seedState is SeedState.Pending -> DynamicAccentState.PENDING
+        else -> DynamicAccentState.FALLBACK
     }
     val density = LocalDensity.current
     // Mature file managers keep body copy around 14-16sp. Several screens use
@@ -90,12 +138,18 @@ fun MyFileBoxTheme(
         density = density.density,
         fontScale = (density.fontScale * 1.1f).coerceIn(1.0f, 1.35f)
     )
-    // 应用内品牌图标：开关打开时用「当前真正生效的主色」柔化染色。
+    // 应用内品牌图标必须与桌面 alias 的颜色一模一样：桌面只能用静态档位色，
+    // 直接用 scheme.primary 会让外观页预览和关于页比桌面图标更鲜艳/更暗。
     // 放在 scheme 之后算，动态取色时拿到的是壁纸派生色而不是旧的 accent。
-    val iconTint = if (iconFollowsTheme) Color(IconTint.soft(scheme.primary.toArgb())) else null
+    val iconTint = if (iconFollowsTheme) {
+        Color(IconTint.buckets[IconTint.bucket(scheme.primary.toArgb())])
+    } else {
+        null
+    }
     CompositionLocalProvider(
         LocalDensity provides readableDensity,
-        LocalAppIconTint provides iconTint
+        LocalAppIconTint provides iconTint,
+        LocalDynamicAccentState provides dynamicAccentState
     ) {
         MaterialTheme(
             colorScheme = scheme,
@@ -124,6 +178,9 @@ private fun lightScheme(primary: Color) = lightColorScheme(
     onSurfaceVariant = Color(0xFF7B879C),
     error = Color(0xFFEF4444),
     outline = Color(0xFFE2E9F5),
+    // 不写 outlineVariant 会拿到 M3 基线值（浅色 #CAC4D0，带一层淡紫），
+    // 与这套蓝色系描边不是一回事，分隔线 / 边框在浅色界面里会显脏。
+    outlineVariant = Color(0xFFD3DEEF),
     // 下面这一组是「容器层」色，M3 里对话框（AlertDialog / 添加网络位置）、
     // 菜单、下拉刷新圆底用的都是它们。
     //
@@ -158,6 +215,7 @@ private fun darkScheme(primary: Color) = darkColorScheme(
     onSurfaceVariant = Color(0xFF9FB0C7),
     error = Color(0xFFFF7A70),
     outline = Color(0xFF24344C),
+    outlineVariant = Color(0xFF2A3A53),
     // 同 lightScheme：深色基线值是 #2B2930（偏紫），换成这套偏蓝的中性层级。
     surfaceTint = Color.Transparent,
     surfaceContainerLowest = Color(0xFF070D18),

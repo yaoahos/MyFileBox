@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 桌面启动图标主题色档 7（第二版资源名，避免桌面沿用旧图标缓存）。颜色见 values/colors.xml。 -->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@color/icon_tint_7" />
+    <foreground android:drawable="@drawable/ic_launcher_folder_fg" />
+    <monochrome android:drawable="@drawable/ic_launcher_monochrome" />
+</adaptive-icon>

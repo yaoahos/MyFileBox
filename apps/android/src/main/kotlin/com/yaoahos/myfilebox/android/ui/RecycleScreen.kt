@@ -15,7 +15,6 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
@@ -29,8 +28,8 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.DeleteOutline
-import androidx.compose.material.icons.outlined.DeleteSweep
 import androidx.compose.material.icons.outlined.Folder
+import androidx.compose.material.icons.outlined.FilterList
 import androidx.compose.material.icons.outlined.GridView
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Restore
@@ -64,6 +63,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.yaoahos.myfilebox.android.data.LocalRepository
+import com.yaoahos.myfilebox.core.displayParent
 import com.yaoahos.myfilebox.core.FileKinds
 import com.yaoahos.myfilebox.core.RecycleItem
 
@@ -80,17 +80,22 @@ fun RecycleScreen(state: MyFileBoxState, vm: AppViewModel) {
     var confirmDelete by remember { mutableStateOf(false) }
     var pendingDays by remember { mutableStateOf<Int?>(null) }
     var detailItem by remember { mutableStateOf<RecycleItem?>(null) }
+    var filterOpen by remember { mutableStateOf(false) }
     var sortKey by remember { mutableStateOf("time") }
     var sortDir by remember { mutableStateOf("desc") }
     // 清单 14（3.2.0）：回收站视图与外部浏览同步（外面宫格→回收站宫格）。
     val grid = vm.viewModeFor(state.recycleContext) == "grid"
     val selecting = state.recycleSelecting
-    val sortedItems = remember(state.recycleItems, sortKey, sortDir) {
-        val list = state.recycleItems
+    // 回收站有自己的筛选条件（不复用浏览页那份）：这两个字段只在本页生效。
+    val filterOn = state.recycleNameFilter.isNotBlank() || state.recycleExtFilter.isNotBlank()
+    val visibleItems = remember(state.recycleItems, state.recycleNameFilter, state.recycleExtFilter) {
+        vm.recycleVisibleItems()
+    }
+    val sortedItems = remember(visibleItems, sortKey, sortDir) {
         val sorted = when (sortKey) {
-            "name" -> list.sortedBy { it.name.lowercase() }
-            "size" -> list.sortedBy { it.sizeBytes }
-            else -> list.sortedBy { it.deletedAt }
+            "name" -> visibleItems.sortedBy { it.name.lowercase() }
+            "size" -> visibleItems.sortedBy { it.sizeBytes }
+            else -> visibleItems.sortedBy { it.deletedAt }
         }
         if (sortDir == "desc") sorted.reversed() else sorted
     }
@@ -107,7 +112,13 @@ fun RecycleScreen(state: MyFileBoxState, vm: AppViewModel) {
             modifier = Modifier.fillMaxSize()
         ) {
             val header: @Composable () -> Unit = {
-                Column(Modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 18.dp)) {
+                // 稳定状态栏高度：避免启动外部应用时 insets 抖动导致整页跳一下。
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(top = rememberStableStatusBarTop())
+                        .padding(horizontal = 18.dp)
+                ) {
                     Row(
                         Modifier.fillMaxWidth().padding(top = 10.dp),
                         verticalAlignment = Alignment.CenterVertically
@@ -126,20 +137,22 @@ fun RecycleScreen(state: MyFileBoxState, vm: AppViewModel) {
                             Text(
                                 // 回收按底栏分域（清单 5）：本地回收只管本地，群晖回收看 #recycle。
                                 when {
-                                    selecting -> "长按可多选 · 点按继续选择"
+                                    selecting -> SELECTING_HINT
                                     state.recycleContext == FileContext.SYNO -> "群晖删除的文件 · 长按可多选"
-                                    else -> "删除的本地文件会先放到这里"
+                                    else -> "删除的文件先放这里 · 长按可多选"
                                 },
                                 fontSize = 12.sp,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 1,
+                                // 右上角图标收进「更多」后仍有省略风险：宁可换行也别截断成「…」。
+                                maxLines = 2,
                                 overflow = TextOverflow.Ellipsis
                             )
                         }
                         if (selecting) {
                             SelectionSelectAllButton(
-                                allSelected = state.recycleSelected.size == state.recycleItems.size &&
-                                    state.recycleItems.isNotEmpty(),
+                                // 全选只认筛出来的条目，否则筛选在回收站里等于没用。
+                                allSelected = visibleItems.isNotEmpty() &&
+                                    state.recycleSelected.containsAll(visibleItems.map { it.id }),
                                 onClick = vm::toggleRecycleSelectAll
                             )
                         } else {
@@ -157,16 +170,27 @@ fun RecycleScreen(state: MyFileBoxState, vm: AppViewModel) {
                                     modifier = Modifier.size(21.dp)
                                 )
                             }
-                            if (state.recycleItems.isNotEmpty()) {
-                                IconButton(onClick = { confirmEmpty = true }) {
-                                    Icon(
-                                        Icons.Outlined.DeleteSweep, "清空回收站",
-                                        tint = MaterialTheme.colorScheme.error,
-                                        modifier = Modifier.size(21.dp)
-                                    )
-                                }
-                            }
+                            // 筛选 / 传输 / 设置 / 首页 / 清空统一收进「更多」：
+                            // 标题行只留排序 + 视图 + 更多，副标题「删除的本地文件会先放到这里」
+                            // 才不会被四个图标挤到省略号。
+                            HeaderOverflow(
+                                vm,
+                                favoritesContext = state.recycleContext,
+                                hideNavigation = true,
+                                showFilter = true,
+                                onFilter = { filterOpen = true },
+                                filterPair = state.recycleNameFilter to state.recycleExtFilter,
+                                clearAction = if (state.recycleItems.isNotEmpty()) ({ confirmEmpty = true }) else null
+                            )
                         }
+                    }
+                    if (filterOn) {
+                        ActiveFilterBar(
+                            summary = com.yaoahos.myfilebox.android.data.filterSummary(
+                                state.recycleNameFilter, state.recycleExtFilter
+                            ),
+                            onClear = vm::clearRecycleFilters
+                        )
                     }
                     if (state.recycleContext != FileContext.SYNO && !selecting) {
                         Row(
@@ -223,21 +247,27 @@ fun RecycleScreen(state: MyFileBoxState, vm: AppViewModel) {
                                 verticalArrangement = Arrangement.Center
                             ) {
                                 Icon(
-                                    Icons.Outlined.DeleteOutline, null,
+                                    if (filterOn) Icons.Outlined.FilterList else Icons.Outlined.DeleteOutline, null,
                                     tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.85f),
                                     modifier = Modifier.size(44.dp)
                                 )
                                 Text(
-                                    "回收站是空的",
+                                    // 有东西但被筛没了，不能写「回收站是空的」——那会让用户以为文件被彻底删了。
+                                    if (filterOn) "没有匹配的项目" else "回收站是空的",
                                     fontSize = 14.sp,
                                     fontWeight = FontWeight.Medium,
                                     modifier = Modifier.padding(top = 10.dp)
                                 )
                                 Text(
-                                    "删除的文件会先放到这里",
+                                    if (filterOn) "筛后缀时文件夹也会隐藏" else "删除的文件会先放到这里",
                                     fontSize = 12.sp,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
+                                if (filterOn) {
+                                    TextButton(onClick = vm::clearRecycleFilters) {
+                                        Text("清除筛选", fontSize = 12.sp)
+                                    }
+                                }
                             }
                         }
                     }
@@ -272,6 +302,7 @@ fun RecycleScreen(state: MyFileBoxState, vm: AppViewModel) {
                             Column(Modifier.animateItem()) {
                                 RecycleRow(
                                     item = item,
+                                    localRoot = state.localRoot,
                                     selected = item.id in state.recycleSelected,
                                     selecting = selecting,
                                     onClick = {
@@ -315,6 +346,18 @@ fun RecycleScreen(state: MyFileBoxState, vm: AppViewModel) {
                 )
             )
         }
+    }
+
+    if (filterOpen) {
+        FilterDialog(
+            initialName = state.recycleNameFilter,
+            initialExt = state.recycleExtFilter,
+            note = "两个条件同时生效，只筛回收站这一页；不区分大小写。只填后缀时只列文件、" +
+                "文件夹会一并隐藏，想看文件夹先点「清除」。退出回收站后自动清除。",
+            onDismiss = { filterOpen = false },
+            onApply = { n, e -> vm.setRecycleFilters(n, e) },
+            onClear = { vm.clearRecycleFilters() }
+        )
     }
 
     pendingDays?.let { days ->
@@ -379,6 +422,7 @@ fun RecycleScreen(state: MyFileBoxState, vm: AppViewModel) {
 @Composable
 private fun RecycleRow(
     item: RecycleItem,
+    localRoot: String,
     selected: Boolean,
     selecting: Boolean,
     onClick: () -> Unit,
@@ -427,7 +471,7 @@ private fun RecycleRow(
             )
             Text(
                 // 同名文件只看名字分不清，补一行原位置（回收站里最常被问的就是「这是从哪删的」）。
-                (item.originalPath.substringBeforeLast('/', "").ifBlank { "/" }) +
+                displayParent(item.originalPath, localRoot) +
                     " · " + LocalRepository.formatStamp(item.deletedAt),
                 fontSize = 10.sp,
                 lineHeight = 12.sp,
@@ -561,14 +605,5 @@ private fun DetailLine(label: String, value: String) {
     }
 }
 
-private fun formatBytes(bytes: Long): String {
-    if (bytes <= 0) return "0 B"
-    val units = arrayOf("B", "KB", "MB", "GB", "TB")
-    var value = bytes.toDouble()
-    var unit = 0
-    while (value >= 1024 && unit < units.lastIndex) {
-        value /= 1024
-        unit++
-    }
-    return if (unit == 0) "${bytes} B" else String.format("%.1f %s", value, units[unit])
-}
+private fun formatBytes(bytes: Long): String =
+    com.yaoahos.myfilebox.core.FileSizeFormat.format(bytes)

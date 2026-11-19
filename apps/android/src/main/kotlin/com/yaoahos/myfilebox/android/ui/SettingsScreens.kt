@@ -1,5 +1,7 @@
 package com.yaoahos.myfilebox.android.ui
 
+import com.yaoahos.myfilebox.core.displayLeaf
+
 import com.yaoahos.myfilebox.android.BuildConfig
 
 import androidx.compose.animation.core.Spring
@@ -9,7 +11,6 @@ import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -31,12 +32,15 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.Android
 import androidx.compose.material.icons.outlined.Apps
+import androidx.compose.material.icons.outlined.Backup
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.CleaningServices
 import androidx.compose.material.icons.outlined.DeleteSweep
@@ -47,7 +51,7 @@ import androidx.compose.material.icons.outlined.Cloud
 import androidx.compose.material.icons.outlined.DarkMode
 import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.Download
-import androidx.compose.material.icons.outlined.DragHandle
+import androidx.compose.material.icons.outlined.DragIndicator
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.FolderZip
@@ -64,6 +68,7 @@ import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.SystemUpdate
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.SettingsBrightness
+import androidx.compose.material.icons.outlined.SwapHoriz
 import androidx.compose.material.icons.outlined.PictureAsPdf
 import androidx.compose.material.icons.outlined.Videocam
 import androidx.compose.material.icons.outlined.Wifi
@@ -98,7 +103,9 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.zIndex
 import com.yaoahos.myfilebox.android.update.GitHubUpdater
@@ -115,11 +122,19 @@ import com.yaoahos.myfilebox.core.TabKey
 import com.yaoahos.myfilebox.core.ThemeMode
 
 @Composable
-fun SettingsScreen(state: MyFileBoxState, vm: AppViewModel) {
+fun SettingsScreen(
+    state: MyFileBoxState,
+    vm: AppViewModel,
+    // 滚动状态由页面宿主常驻持有：进「关于」再返回不会跳回顶部；
+    // 而「退出设置再进来要回到顶部」由宿主在切换到设置页时统一重置。
+    listState: LazyListState = rememberLazyListState()
+) {
     var chooseDownload by remember { mutableStateOf(false) }
     var downloadPickerPath by remember { mutableStateOf("") }
     var showCacheDays by remember { mutableStateOf(false) }
+    var showConcurrency by remember { mutableStateOf(false) }
     var confirmCleanCache by remember { mutableStateOf(false) }
+    var openDefaultsExpanded by remember { mutableStateOf(false) }
 
     Column(
         // 设置页自带不透明底色：转场时不会透出上一页内容（残影）。
@@ -132,6 +147,7 @@ fun SettingsScreen(state: MyFileBoxState, vm: AppViewModel) {
         SubPageHeader("设置", vm::closeScreen)
         LazyColumn(
             Modifier.weight(1f),
+            state = listState,
             contentPadding = PaddingValues(bottom = 24.dp)
         ) {
         item {
@@ -147,8 +163,56 @@ fun SettingsScreen(state: MyFileBoxState, vm: AppViewModel) {
             }
         }
         item {
+            SettingsSection("启动") {
+                DefaultTabRow(state.prefs.defaultTab, vm::setDefaultTab)
+            }
+        }
+        item {
+            SettingsSection("底栏") {
+                val tabs = (state.prefs.tabOrder + listOf(TabKey.LOCAL, TabKey.SYNO, TabKey.NET)).distinct()
+                ReorderGroup(count = tabs.size, keyOf = { tabs[it] }) { index ->
+                    TabSettingRow(
+                        tab = tabs[index],
+                        state = state,
+                        onToggle = { vm.toggleTab(tabs[index]) },
+                        onMove = { vm.moveTab(tabs[index], it) }
+                    )
+                }
+            }
+        }
+        item {
             SettingsSection("本地文件") {
                 ModuleSettings(state, vm)
+            }
+        }
+        item {
+            // 「最近」的展示口径。默认都关掉噪音：但只影响「最近」这一处，
+            // 进目录里看文件始终不受影响。
+            SettingsSection("最近文件") {
+                SettingRow(
+                    Icons.Outlined.History,
+                    "隐藏备份副本",
+                    "「最近」不显示 .bak 等备份副本",
+                    onClick = { vm.setHideRecentBackups(!state.hideRecentBackups) },
+                    trailing = {
+                        Switch(
+                            checked = state.hideRecentBackups,
+                            onCheckedChange = vm::setHideRecentBackups
+                        )
+                    }
+                )
+                SettingRow(
+                    Icons.Outlined.CleaningServices,
+                    "隐藏应用缓存",
+                    "「最近」不显示微信、QQ 缓存",
+                    onClick = { vm.setHideRecentCache(!state.hideRecentCache) },
+                    trailing = {
+                        Switch(
+                            checked = state.hideRecentCache,
+                            onCheckedChange = vm::setHideRecentCache
+                        )
+                    }
+                )
             }
         }
         item {
@@ -173,36 +237,24 @@ fun SettingsScreen(state: MyFileBoxState, vm: AppViewModel) {
             }
         }
         item {
-            SettingsSection("底栏") {
-                val tabs = (state.prefs.tabOrder + listOf(TabKey.LOCAL, TabKey.SYNO, TabKey.NET)).distinct()
-                ReorderGroup(count = tabs.size, keyOf = { tabs[it] }) { index ->
-                    TabSettingRow(
-                        tab = tabs[index],
-                        state = state,
-                        onToggle = { vm.toggleTab(tabs[index]) },
-                        onMove = { vm.moveTab(tabs[index], it) }
-                    )
-                }
-            }
-        }
-        item {
-            SettingsSection("启动") {
-                DefaultTabRow(state.prefs.defaultTab, vm::setDefaultTab)
-            }
-        }
-        item {
             SettingsSection("下载") {
                 SettingRow(
                     Icons.Outlined.Download,
                     "默认下载位置",
-                    state.prefs.downloadFolder.substringAfterLast('/').ifBlank { "未设置" },
+                    displayLeaf(state.prefs.downloadFolder, state.localRoot, "未设置"),
                     onClick = {
                         downloadPickerPath = state.prefs.downloadFolder.ifBlank { state.localRoot }
                         chooseDownload = true
                     }
                 )
+                SettingRow(
+                    Icons.Outlined.SwapHoriz,
+                    "下载并发数",
+                    "${state.prefs.downloadConcurrency} 个文件同时下载",
+                    onClick = { showConcurrency = true }
+                )
                 Text(
-                    "已设置时，下载会直接保存到这里；未设置时会先让你选择位置。",
+                    "未设置位置时下载前会先询问；并发数范围为 1~6，数值越大越快，对 NAS 与弱网压力越大。",
                     fontSize = 12.sp,
                     color = MutedText,
                     lineHeight = 16.sp,
@@ -220,7 +272,24 @@ fun SettingsScreen(state: MyFileBoxState, vm: AppViewModel) {
                         "未设置 · 每次都会询问用哪个应用"
                     )
                 } else {
-                    defaults.forEach { (key, label) ->
+                    // 默认打开方式可能积累几十条，默认只列前 3 条，避免把设置页拉得过长。
+                    val shown = if (openDefaultsExpanded) defaults else defaults.take(3)
+                    if (defaults.size > 3) {
+                        SettingRow(
+                            Icons.Outlined.Apps,
+                            "默认打开方式",
+                            "已记住 ${defaults.size} 项${if (openDefaultsExpanded) "" else " · 仅显示前 3 项"}",
+                            onClick = { openDefaultsExpanded = !openDefaultsExpanded },
+                            trailing = {
+                                TextButton(onClick = { openDefaultsExpanded = !openDefaultsExpanded }) {
+                                    Text(if (openDefaultsExpanded) "收起" else "展开", fontSize = 12.sp)
+                                }
+                            }
+                        )
+                    } else {
+                        SettingRow(Icons.Outlined.Apps, "默认打开方式", "已记住 ${defaults.size} 项")
+                    }
+                    shown.forEach { (key, label) ->
                         SettingRow(
                             // 图标跟着类型走：压缩包 / 图片 / 安装包各用自己的图标，
                             // 全是「文档」图标时用户得逐行读文字才分得清。
@@ -234,6 +303,18 @@ fun SettingsScreen(state: MyFileBoxState, vm: AppViewModel) {
                                 }
                             }
                         )
+                    }
+                    if (defaults.size > 3) {
+                        TextButton(
+                            onClick = { vm.clearAllOpenDefaults() },
+                            modifier = Modifier.padding(horizontal = 16.dp)
+                        ) {
+                            Text(
+                                "清空全部默认打开方式（${defaults.size} 项）",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.error
+                            )
+                        }
                     }
                 }
                 Text(
@@ -268,6 +349,18 @@ fun SettingsScreen(state: MyFileBoxState, vm: AppViewModel) {
                     color = MutedText,
                     lineHeight = 16.sp,
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                )
+            }
+        }
+        item {
+            // 备份与同步：备份（存本机加密文件）在上，同步（WebDAV 跨设备）在下，
+            // 入口单独成段，放在「存储与缓存」之后——它属于数据安全，不属于日常开关。
+            SettingsSection("备份与同步") {
+                SettingRow(
+                    Icons.Outlined.Backup,
+                    "备份与同步",
+                    if (state.sync.autoSyncOn) "云同步 · 自动同步${state.sync.interval.label}" else "加密备份配置 · 支持 WebDAV 同步",
+                    onClick = vm::openBackupSync
                 )
             }
         }
@@ -340,6 +433,54 @@ fun SettingsScreen(state: MyFileBoxState, vm: AppViewModel) {
             confirmButton = { TextButton(onClick = { showCacheDays = false }) { Text("取消") } }
         )
     }
+    if (showConcurrency) {
+        // 下载并发数：1 最省资源、6 最快（弱网/机械盘 NAS 建议 2~3）。
+        AlertDialog(
+            onDismissRequest = { showConcurrency = false },
+            title = { Text("下载并发数", fontWeight = FontWeight.Bold) },
+            text = {
+                Column {
+                    Text(
+                        "并发越大速度越快，对 NAS 与弱网压力越大；弱网或机械硬盘 NAS 建议 2~3。",
+                        fontSize = 12.sp,
+                        color = MutedText,
+                        modifier = Modifier.padding(bottom = 6.dp)
+                    )
+                    (1..6).forEach { n ->
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .clickable {
+                                    showConcurrency = false
+                                    vm.setDownloadConcurrency(n)
+                                }
+                                .padding(vertical = 10.dp, horizontal = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            RadioButton(
+                                selected = state.prefs.downloadConcurrency == n,
+                                onClick = {
+                                    showConcurrency = false
+                                    vm.setDownloadConcurrency(n)
+                                }
+                            )
+                            Text(
+                                "$n 个文件同时下载" + when (n) {
+                                    1 -> "（最稳，速度最慢）"
+                                    6 -> "（最快，对 NAS 压力最大）"
+                                    else -> ""
+                                },
+                                fontSize = 13.sp,
+                                modifier = Modifier.padding(start = 4.dp)
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { showConcurrency = false }) { Text("取消") } }
+        )
+    }
     if (chooseDownload) {
         // 与「上传文件夹」完全同一套文件树（清单 12 / 13）：
         // 点行进入下一层、右侧圆圈单选、底部「选择」才确认。
@@ -371,6 +512,7 @@ private fun ModuleSettings(state: MyFileBoxState, vm: AppViewModel) {
             val moduleKey = keys[index]
             val (name, subtitle) = labels[moduleKey] ?: (moduleKey to "")
             ReorderableRow({ vm.moveModule(moduleKey, it) }) { handleModifier ->
+                ReorderHandle(handleModifier)
                 Icon(
                     if (group == "syno") Icons.Outlined.Cloud else Icons.Outlined.Folder,
                     null,
@@ -381,7 +523,6 @@ private fun ModuleSettings(state: MyFileBoxState, vm: AppViewModel) {
                     Text(name, fontSize = 12.sp, fontWeight = FontWeight.Medium)
                     Text(subtitle, fontSize = 12.sp, color = MutedText, maxLines = 1)
                 }
-                ReorderHandle(handleModifier)
                 Switch(checked = vm.moduleVisible(moduleKey), onCheckedChange = { vm.toggleModule(moduleKey) })
             }
         }
@@ -396,93 +537,20 @@ private fun ModuleSettings(state: MyFileBoxState, vm: AppViewModel) {
 }
 
 @Composable
-private fun AccountCard(session: Session, onEdit: () -> Unit, onLogout: () -> Unit) {
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .padding(6.dp)
-            .clip(RoundedCornerShape(18.dp))
-            .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.65f))
-            .padding(14.dp)
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Box(
-                Modifier.size(48.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primary),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(session.name.take(1).uppercase(), color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold)
-            }
-            Column(Modifier.weight(1f).padding(start = 12.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(session.name, fontSize = 15.sp, fontWeight = FontWeight.Bold)
-                    Text(
-                        "已连接",
-                        fontSize = 12.sp,
-                        color = Color(0xFF138A5B),
-                        modifier = Modifier.padding(start = 6.dp).clip(RoundedCornerShape(8.dp)).background(Color(0xFFDDF6EA)).padding(horizontal = 6.dp, vertical = 2.dp)
-                    )
-                }
-                Text("${session.account}@${session.server}", fontSize = 12.sp, color = MutedText, modifier = Modifier.padding(top = 2.dp))
-                Text("${session.nas} · DSM 7.2 · HTTPS", fontSize = 12.sp, color = MutedText, modifier = Modifier.padding(top = 1.dp))
-            }
-        }
-        HorizontalDivider(Modifier.padding(top = 12.dp, bottom = 10.dp), color = MaterialTheme.colorScheme.outline.copy(alpha = 0.7f))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedButton(
-                onClick = onEdit,
-                modifier = Modifier.weight(1f).height(38.dp),
-                shape = RoundedCornerShape(12.dp),
-                colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.onSurface)
-            ) {
-                Icon(Icons.Outlined.Edit, null, modifier = Modifier.size(14.dp))
-                Text("编辑连接", fontSize = 12.sp, modifier = Modifier.padding(start = 4.dp))
-            }
-            OutlinedButton(
-                onClick = onLogout,
-                modifier = Modifier.weight(1f).height(38.dp),
-                shape = RoundedCornerShape(12.dp),
-                colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFE25C5C))
-            ) {
-                Icon(Icons.Outlined.Logout, null, modifier = Modifier.size(14.dp))
-                Text("退出登录", fontSize = 12.sp, modifier = Modifier.padding(start = 4.dp))
-            }
-        }
-    }
-}
-
-@Composable
-private fun GuestCard(vm: AppViewModel) {
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .padding(6.dp)
-            .clip(RoundedCornerShape(18.dp))
-            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f))
-            .padding(14.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Box(
-            Modifier.size(44.dp).clip(CircleShape).background(MaterialTheme.colorScheme.surfaceVariant),
-            contentAlignment = Alignment.Center
-        ) { Icon(Icons.Outlined.Person, null, tint = MutedText, modifier = Modifier.size(24.dp)) }
-        Column(Modifier.weight(1f).padding(start = 11.dp)) {
-            Text("尚未登录", fontSize = 13.sp, fontWeight = FontWeight.Bold)
-            Text("登录后可访问群晖文件", fontSize = 12.sp, color = MutedText)
-        }
-        Button(onClick = { vm.goToLogin() }, shape = RoundedCornerShape(11.dp), contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)) {
-            Text("去登录", fontSize = 12.sp)
-        }
-    }
-}
-
-@Composable
 private fun ReorderHandle(modifier: Modifier = Modifier) {
-    Icon(
-        Icons.Outlined.DragHandle,
-        contentDescription = "拖动排序",
-        tint = MutedText,
-        modifier = modifier.size(30.dp)
-    )
+    // 6 点「拖拽指示」比两条横线更像把手，也更容易和「菜单」图标区分开；
+    // 外面套一层 28dp 的方形触摸区，长按落点不必精确压在 18dp 的图标上。
+    Box(
+        modifier.size(28.dp).clip(RoundedCornerShape(9.dp)),
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(
+            Icons.Outlined.DragIndicator,
+            contentDescription = "长按拖动排序",
+            tint = MutedText.copy(alpha = 0.62f),
+            modifier = Modifier.size(18.dp)
+        )
+    }
 }
 
 /**
@@ -581,10 +649,16 @@ private fun ReorderableRow(
         label = "reorder-shift-$index"
     )
 
-    // 手势只挂在拖动把手上：无需长按，普通上下滑动列表不会误触发排序。
+    // 手势只挂在拖动把手上，而且要长按才生效：普通上下滑动列表不会误触发排序，
+    // 想直接把列表当点击区扫过去也不会把行拖走（之前按下即拖，一碰就乱）。
+    // 长按触发时给一次触觉反馈，用户能明确感知「现在开始拖了」。
+    val haptics = LocalHapticFeedback.current
     val handleModifier = Modifier.pointerInput(shared, index) {
-        detectDragGestures(
-            onDragStart = { shared?.start(index) },
+        detectDragGesturesAfterLongPress(
+            onDragStart = {
+                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                shared?.start(index)
+            },
             onDragEnd = {
                 val steps = shared?.finish() ?: 0
                 if (steps != 0) currentOnMove.value(steps)
@@ -643,12 +717,13 @@ private fun TabSettingRow(tab: TabKey, state: MyFileBoxState, onToggle: () -> Un
         TabKey.NET -> Icons.Outlined.Wifi
     }
     ReorderableRow(onMove) { handleModifier ->
+        // 把手放行首：与右侧开关拉开距离，长按拖拽时不会顺手把开关拨掉。
+        ReorderHandle(handleModifier)
         Icon(icon, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
         Column(Modifier.weight(1f).padding(start = 10.dp)) {
             Text(label, fontSize = 12.sp, fontWeight = FontWeight.Medium)
             Text(if (visible) "显示在底栏" else "已隐藏", fontSize = 12.sp, color = MutedText)
         }
-        ReorderHandle(handleModifier)
         Switch(checked = visible, onCheckedChange = { onToggle() }, modifier = Modifier.padding(start = 2.dp))
     }
 }
@@ -848,11 +923,6 @@ private fun SettingRow(icon: ImageVector, title: String, subtitle: String, onCli
 }
 
 @Composable
-private fun Chevron() {
-    Icon(Icons.Outlined.ChevronRight, null, tint = MutedText, modifier = Modifier.size(18.dp))
-}
-
-@Composable
 fun SubPageHeader(title: String, onBack: () -> Unit, trailing: (@Composable () -> Unit)? = null) {
     Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
         Surface(shape = CircleShape, color = MaterialTheme.colorScheme.surface, shadowElevation = 2.dp, modifier = Modifier.size(36.dp)) {
@@ -872,40 +942,10 @@ private fun themeSubtitle(mode: ThemeMode): String = when (mode) {
 }
 
 @Composable
-private fun EditConnectionDialog(session: Session, onDismiss: () -> Unit, onSave: (String, String, String) -> Unit) {
-    var server by remember { mutableStateOf(session.server) }
-    var account by remember { mutableStateOf(session.account) }
-    var password by remember { mutableStateOf("") }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("编辑连接", fontWeight = FontWeight.Bold) },
-        text = {
-            Column(
-                Modifier
-                    .imePadding()
-                    .verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(9.dp)
-            ) {
-                OutlinedTextField(server, { server = it }, label = { Text("服务器或 QuickConnect ID") }, singleLine = true, shape = RoundedCornerShape(12.dp), colors = dialogFieldColors())
-                OutlinedTextField(account, { account = it }, label = { Text("账号") }, singleLine = true, shape = RoundedCornerShape(12.dp), colors = dialogFieldColors())
-                PasswordField(
-                    value = password,
-                    onValueChange = { password = it },
-                    label = "密码（留空则保持原密码）"
-                )
-                Text("保存后会重新登录并校验服务器。", fontSize = 12.sp, color = MutedText)
-            }
-        },
-        confirmButton = { Button(onClick = { onSave(server, account, password) }, shape = RoundedCornerShape(12.dp)) { Text("保存修改") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
-    )
-}
-
-@Composable
 fun AboutScreen(vm: AppViewModel) {
     Column(Modifier.fillMaxSize().statusBarsPadding()) {
         // 返回箭头固定（3.9.16），不随内容滚走。
-        SubPageHeader("关于", { vm.closeScreen() }) { HeaderOverflow(vm, hideNavigation = true) }
+        SubPageHeader("关于", { vm.closeScreen() }) { HeaderOverflow(vm, hideNavigation = true, showSettings = false) }
         LazyColumn(
             Modifier.weight(1f),
             contentPadding = PaddingValues(bottom = 30.dp)

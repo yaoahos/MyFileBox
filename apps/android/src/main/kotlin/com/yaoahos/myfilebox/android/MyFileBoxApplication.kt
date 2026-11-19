@@ -20,7 +20,24 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-class MyFileBoxApplication : Application() {
+/**
+ * 把 WorkManager 的初始化从启动路径里摘出来。
+ *
+ * manifest 里移除了 `WorkManagerInitializer`（它会在 ContentProvider 阶段打开
+ * Room 数据库并重排所有任务，冷启动实测占掉可观的固定开销），改为由本类提供
+ * [androidx.work.Configuration]。这样 `WorkManager.getInstance()` 第一次被调用时
+ * 才真正初始化——目前只有「自动同步」用到它，而那条路径本来就在后台协程里。
+ *
+ * 注意：必须实现 Provider，否则移除 initializer 后 `getInstance()` 会抛
+ * IllegalStateException，自动同步会静默失效。
+ */
+class MyFileBoxApplication : Application(), androidx.work.Configuration.Provider {
+
+    override val workManagerConfiguration: androidx.work.Configuration
+        get() = androidx.work.Configuration.Builder()
+            .setMinimumLoggingLevel(Log.WARN)
+            .build()
+
     companion object {
         private const val TAG = "MFB-THEME"
 
@@ -105,28 +122,6 @@ class MyFileBoxApplication : Application() {
         runCatching {
             File(getExternalFilesDir(null), "crash-$stamp.txt").writeText(text)
         }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            runCatching {
-                val values = ContentValues().apply {
-                    put(MediaStore.MediaColumns.DISPLAY_NAME, "MyFileBox-crash-$stamp.txt")
-                    put(MediaStore.MediaColumns.MIME_TYPE, "text/plain")
-                    put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
-                    put(MediaStore.MediaColumns.IS_PENDING, 1)
-                }
-                val resolver = contentResolver
-                val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: return@runCatching
-                resolver.openOutputStream(uri)?.use { it.write(text.toByteArray()) }
-                values.clear()
-                values.put(MediaStore.MediaColumns.IS_PENDING, 0)
-                resolver.update(uri, values, null, null)
-            }
-        } else {
-            runCatching {
-                File(
-                    Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
-                    "MyFileBox-crash-$stamp.txt"
-                ).writeText(text)
-            }
-        }
+        // 堆栈里可能带服务器地址/路径，只留应用私有目录，不再写公共 Downloads。
     }
 }

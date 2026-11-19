@@ -131,7 +131,7 @@ class SmbRepository {
                 target.length() > 0
             }
         }.onFailure {
-            android.util.Log.w("MFB-SMB", "download failed remote=$remote target=${target.absolutePath}", it)
+            android.util.Log.w("MFB-SMB", "download failed: ${it.javaClass.simpleName}")
         }.getOrDefault(false)
         // 数据完整收到才算失败之外的成功：宁可接受「尾包解析报错但字节齐」，
         // 也不要把完整文件报成失败；空文件（expectedSize=0）同样算成功。
@@ -139,44 +139,63 @@ class SmbRepository {
         val complete = ok || sizeComplete
         android.util.Log.i(
             "MFB-SMB",
-            "download done remote=$remote ok=$ok written=$written expect=$expectedSize complete=$complete"
+            "download done ok=$ok written=$written expect=$expectedSize complete=$complete"
         )
         complete
     }
 
     /** 打开 SMB 文件流式读取（供 StreamProxy 转发给播放器）。 */
     fun openStream(connection: NetworkConnection, remote: String, offset: Long = 0L): java.io.InputStream {
-        val (shareName, _) = base(connection)
-        val (_, relative) = smbPath(connection, remote)
-        val client = SMBClient(config)
-        val conn = client.connect(connection.host, connection.port)
-        val auth = AuthenticationContext(
-            connection.username.ifBlank { "Guest" },
-            connection.password.toCharArray(),
-            null
-        )
-        val session = conn.authenticate(auth)
-        val share = session.connectShare(shareName) as DiskShare
-        val file = share.openFile(
-            relative,
-            EnumSet.of(AccessMask.GENERIC_READ),
-            null,
-            SMB2ShareAccess.ALL,
-            SMB2CreateDisposition.FILE_OPEN,
-            null
-        )
-        val baseStream = file.inputStream
-        if (offset > 0) skipFully(baseStream, offset)
-        // 包装流：关闭时释放 SMB 资源。
-        return object : java.io.FilterInputStream(baseStream) {
-            override fun close() {
-                runCatching { super.close() }
-                runCatching { file.close() }
-                runCatching { share.close() }
-                runCatching { session.close() }
-                runCatching { conn.close() }
-                runCatching { client.close() }
+        // 建链失败时没有任何包装流可以 close，必须在这里按创建顺序逆序回收，
+        // 否则播放器 seek / 重试几次就会累积 SMB 连接与 socket。
+        var client: AutoCloseable? = null
+        var conn: AutoCloseable? = null
+        var session: AutoCloseable? = null
+        var share: AutoCloseable? = null
+        var file: AutoCloseable? = null
+        var stream: AutoCloseable? = null
+        try {
+            val (shareName, _) = base(connection)
+            val (_, relative) = smbPath(connection, remote)
+            val smbClient = SMBClient(config).also { client = it }
+            val smbConn = smbClient.connect(connection.host, connection.port).also { conn = it }
+            val auth = AuthenticationContext(
+                connection.username.ifBlank { "Guest" },
+                connection.password.toCharArray(),
+                null
+            )
+            val smbSession = smbConn.authenticate(auth).also { session = it }
+            val diskShare = smbSession.connectShare(shareName) as DiskShare
+            share = diskShare
+            val diskFile = diskShare.openFile(
+                relative,
+                EnumSet.of(AccessMask.GENERIC_READ),
+                null,
+                SMB2ShareAccess.ALL,
+                SMB2CreateDisposition.FILE_OPEN,
+                null
+            ).also { file = it }
+            val baseStream = diskFile.inputStream.also { stream = it }
+            if (offset > 0) skipFully(baseStream, offset)
+            // 包装流：关闭时释放 SMB 资源。
+            return object : java.io.FilterInputStream(baseStream) {
+                override fun close() {
+                    runCatching { super.close() }
+                    runCatching { file?.close() }
+                    runCatching { share?.close() }
+                    runCatching { session?.close() }
+                    runCatching { conn?.close() }
+                    runCatching { client?.close() }
+                }
             }
+        } catch (t: Throwable) {
+            stream?.let { runCatching { it.close() } }
+            file?.let { runCatching { it.close() } }
+            share?.let { runCatching { it.close() } }
+            session?.let { runCatching { it.close() } }
+            conn?.let { runCatching { it.close() } }
+            client?.let { runCatching { it.close() } }
+            throw t
         }
     }
 
@@ -214,12 +233,27 @@ class SmbRepository {
     suspend fun delete(connection: NetworkConnection, paths: List<String>): Boolean = withContext(Dispatchers.IO) {
         runCatching {
             withShare(connection) { share, _ ->
-                paths.all { path ->
+                var allDone = true
+                // 逐个删、结果聚合，不能用 all{}：第一项失败（正在写的文件被服务端占用、
+                // 目录里还有别人的东西）会短路，同批剩下的文件全部不删——上传中删记录
+                // 时表现就是「远端一份都没清掉」。
+                paths.forEach { path ->
                     val (_, relative) = smbPath(connection, path)
-                    runCatching {
-                        if (share.folderExists(relative)) share.rmdir(relative, true) else share.rm(relative)
-                    }.isSuccess
+                    if (relative.isBlank()) return@forEach
+                    val ok = runCatching {
+                        when {
+                            // 先判文件：folderExists 对文件返回 false，顺序反了会把文件当目录。
+                            share.fileExists(relative) -> share.rm(relative)
+                            // SMB 的 rmdir 是递归删，调用方已保证只对本次上传产生的目录用。
+                            share.folderExists(relative) -> share.rmdir(relative, true)
+                            // 本来就不在了：清理的目标达成，算成功。
+                            else -> Unit
+                        }
+                        true
+                    }.getOrDefault(false)
+                    if (!ok) allDone = false
                 }
+                allDone
             }
         }.getOrDefault(false)
     }
@@ -281,19 +315,21 @@ class SmbRepository {
             runCatching {
                 withShare(connection) { share, _ ->
                     val (_, relativeDir) = smbPath(connection, destDir)
-                    paths.all { path ->
+                    var allDone = true
+                    // 不能用 all{} 短路：同 delete，第一项失败会让同批其余条目全部跳过。
+                    paths.forEach { path ->
                         val (_, relative) = smbPath(connection, path)
                         val name = relative.substringAfterLast('\\')
                         val target = if (relativeDir.isBlank()) name else "$relativeDir\\$name"
-                        if (move) {
-                            if (!copyEntry(share, relative, target)) return@all false
-                            runCatching {
-                                if (share.folderExists(relative)) share.rmdir(relative, true) else share.rm(relative)
-                            }.isSuccess
-                        } else {
-                            copyEntry(share, relative, target)
-                        }
+                        val ok = runCatching {
+                            if (!copyEntry(share, relative, target)) return@runCatching false
+                            if (!move) return@runCatching true
+                            if (share.folderExists(relative)) share.rmdir(relative, true) else share.rm(relative)
+                            true
+                        }.getOrDefault(false)
+                        if (!ok) allDone = false
                     }
+                    allDone
                 }
             }.getOrDefault(false)
         }

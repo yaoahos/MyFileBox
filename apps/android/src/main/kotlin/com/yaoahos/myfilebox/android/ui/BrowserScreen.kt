@@ -28,7 +28,6 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -111,17 +110,17 @@ import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalClipboardManager
-import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.yaoahos.myfilebox.android.data.nameMatchesFilter
+import com.yaoahos.myfilebox.android.data.filterSummary
+import com.yaoahos.myfilebox.android.data.itemMatchesFilter
 import com.yaoahos.myfilebox.core.FileEntry
 import java.io.File
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun BrowserScreen(state: MyFileBoxState, vm: AppViewModel) {
     val browser = state.browser ?: return
@@ -147,16 +146,20 @@ fun BrowserScreen(state: MyFileBoxState, vm: AppViewModel) {
     var showUploadFiles by remember { mutableStateOf(false) }
     var showUploadFolder by remember { mutableStateOf(false) }
     val selecting = state.selectionActive || state.selected.isNotEmpty()
-    val allSelected = browser.items.isNotEmpty() && state.selected.containsAll(browser.items.map { it.id })
     val favoritesPage = browser.title == "收藏"
     val crumbTrail = state.browserStack + listOfNotNull(browser)
     // 清单 1（3.1.0）：所有文件不再给三点按钮，FileActionSheet 已删除；操作走长按多选。
     val rowShowMore = false
-    // 名称筛选只影响展示；选择、全选仍按整个目录算，避免「筛掉的文件被悄悄漏选」。
-    val shownItems = remember(browser.items, state.nameFilter) {
-        if (state.nameFilter.isBlank()) browser.items
-        else browser.items.filter { nameMatchesFilter(it.name, state.nameFilter) }
+    // 名称 / 后缀筛选作用在「这一屏」：展示、勾选、全选都只认筛出来的条目。
+    val filtering = state.nameFilter.isNotBlank() || state.extensionFilter.isNotBlank()
+    val shownItems = remember(browser.items, state.nameFilter, state.extensionFilter) {
+        if (!filtering) browser.items
+        else browser.items.filter {
+            itemMatchesFilter(it.name, it.isFolder, state.nameFilter, state.extensionFilter)
+        }
     }
+    // 全选按钮的状态按可见条目算：筛选生效时，勾选筛出来的那些就算「已全选」。
+    val allSelected = shownItems.isNotEmpty() && state.selected.containsAll(shownItems.map { it.id })
     // 「最近」分类按具体日期分区、按分组懒加载：默认最近 3 组，滚到底再加载更早（清单 13）。
     val dateGroups = remember(shownItems) { recentFileGroups(shownItems) }
     var dateGroupsVisible by remember(shownItems) { mutableStateOf(3) }
@@ -167,7 +170,9 @@ fun BrowserScreen(state: MyFileBoxState, vm: AppViewModel) {
         Modifier
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
-            .statusBarsPadding()
+            // 稳定的状态栏高度：点文件启动外部应用时 statusBars insets 会瞬时抖小，
+            // 直接读 insets 会让整页上移约 40px 再跳回（真机录屏实测）。
+            .padding(top = rememberStableStatusBarTop())
             .pointerInput(selecting) {
                 if (selecting) {
                     detectHorizontalDragGestures { change, _ ->
@@ -208,41 +213,34 @@ fun BrowserScreen(state: MyFileBoxState, vm: AppViewModel) {
                     )
                     if (selecting) {
                         Text(
-                            "轻点文件继续选择 · 长按可多选",
+                            SELECTING_HINT,
                             fontSize = 12.sp,
                             color = MutedText,
                             maxLines = 1
                         )
                     } else {
-                        val from = (crumbTrail.size - 2).coerceAtLeast(0)
                         val rootLabel = when (browser.ctx) {
                             FileContext.LOCAL -> "内部存储"
                             FileContext.SYNO -> "群晖 NAS"
                             FileContext.NET -> "网络存储"
                         }
-                        if (crumbTrail.size <= 1) {
-                            Text(rootLabel, fontSize = 12.sp, color = MutedText, maxLines = 1)
-                        } else Row(verticalAlignment = Alignment.CenterVertically) {
-                            if (from > 0) {
-                                Text("…", fontSize = 12.sp, color = MutedText)
-                                Icon(Icons.Outlined.ChevronRight, null, modifier = Modifier.size(12.dp), tint = MutedText)
-                            }
-                            for (i in from until crumbTrail.size) {
-                                Text(
-                                    crumbTrail[i].title,
-                                    fontSize = 12.sp,
-                                    color = if (i == crumbTrail.lastIndex) MutedText else MaterialTheme.colorScheme.primary,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                    modifier = Modifier
-                                        .weight(1f, fill = false)
-                                        .clickable(enabled = i != crumbTrail.lastIndex) { vm.jumpToCrumb(i) }
-                                )
-                                if (i < crumbTrail.lastIndex) {
-                                    Icon(Icons.Outlined.ChevronRight, null, modifier = Modifier.size(11.dp), tint = MutedText)
-                                }
-                            }
-                        }
+                        // 只有一层（分类页 / 端根）时没有逐级页面可点：把 path 按「 / 」摊成
+                        // 若干段参与同一套取舍，别整串丢给省略号，那样最里层名字会被截断。
+                        val trailLabels = if (crumbTrail.size <= 1) {
+                            browser.path.split(" / ").map { it.trim() }.filter { it.isNotBlank() }
+                        } else crumbTrail.map { it.title }
+                        // 端名固定当最外层（不对应某个页面，只作定位用）；path 里已经带了端名时去掉重复。
+                        val tail = if (trailLabels.firstOrNull() == rootLabel) trailLabels.drop(1) else trailLabels
+                        PathBreadcrumbs(
+                            labels = listOf(rootLabel) + tail,
+                            emphasizeCurrent = false,
+                            chevronSize = 11.dp,
+                            // 第 0 段是端名，第 i 段对应面包屑第 i-1 层。
+                            clickableFrom = 1,
+                            onCrumbClick = if (crumbTrail.size > 1) { index ->
+                                vm.jumpToCrumb(index - 1)
+                            } else null
+                        )
                     }
                 }
                 if (selecting) {
@@ -250,8 +248,26 @@ fun BrowserScreen(state: MyFileBoxState, vm: AppViewModel) {
                     SelectionSelectAllButton(allSelected = allSelected, onClick = vm::toggleSelectAll)
                 } else {
                     if (vm.canPasteHere()) {
-                        IconButton(onClick = vm::pasteClipboard) {
-                            Icon(Icons.Outlined.ContentPaste, "粘贴", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
+                        // 长按取消复制 / 移动：剪贴板不该一直占着顶栏，
+                        // 用户临时改主意也能就地丢掉，不必先去目标目录贴掉。
+                        val pasteInteraction = remember { MutableInteractionSource() }
+                        Box(
+                            Modifier
+                                .size(40.dp)
+                                .pressScale(pasteInteraction)
+                                .combinedClickable(
+                                    interactionSource = pasteInteraction,
+                                    indication = null,
+                                    onClick = vm::pasteClipboard,
+                                    onLongClick = vm::cancelClipboard
+                                ),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                Icons.Outlined.ContentPaste, "粘贴（长按取消复制 / 移动）",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(20.dp)
+                            )
                         }
                     }
                     val sortTabKey = when (browser.ctx) {
@@ -259,12 +275,15 @@ fun BrowserScreen(state: MyFileBoxState, vm: AppViewModel) {
                         FileContext.SYNO -> "syno"
                         FileContext.NET -> "net"
                     }
-                    SortMenuButton(
-                        sortKey = vm.sortKeyFor(sortTabKey),
-                        sortDir = vm.sortDirFor(sortTabKey),
-                        onPick = { key, dir -> vm.setSort(key, dir, sortTabKey) },
-                        showSize = true
-                    )
+                    // 「最近」是按日期分区的时间流，排序与它无关，这里不提供排序入口。
+                    if (!browser.groupByDate) {
+                        SortMenuButton(
+                            sortKey = vm.sortKeyFor(sortTabKey),
+                            sortDir = vm.sortDirFor(sortTabKey),
+                            onPick = { key, dir -> vm.setSort(key, dir, sortTabKey) },
+                            showSize = true
+                        )
+                    }
                     IconButton(onClick = { vm.toggleViewFor(browser.ctx) }) {
                         Icon(
                             if (vm.viewModeFor(browser.ctx) == "grid") Icons.Outlined.ViewList else Icons.Outlined.GridView,
@@ -273,11 +292,14 @@ fun BrowserScreen(state: MyFileBoxState, vm: AppViewModel) {
                             modifier = Modifier.size(21.dp)
                         )
                     }
-                    // 收藏页里不再提供「收藏/回收/设置/关于」互跳入口，防止套娃。
-                    // 收藏页右上角不放三点按钮（清单 13）。
-                    if (!favoritesPage) {
-                        HeaderOverflow(vm, browser.ctx, showFilter = true)
-                    }
+                    // 收藏页里不再提供「收藏/回收/设置/关于」互跳入口，防止套娃；
+                    // 但筛选必须留着——收藏多了同样需要按名称 / 后缀找。
+                    HeaderOverflow(
+                        vm = vm,
+                        favoritesContext = browser.ctx,
+                        hideNavigation = favoritesPage,
+                        showFilter = true
+                    )
                 }
             }
             Row(
@@ -285,13 +307,17 @@ fun BrowserScreen(state: MyFileBoxState, vm: AppViewModel) {
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    if (state.nameFilter.isBlank()) "${shownItems.size} 个项目"
+                    if (!filtering) "${shownItems.size} 个项目"
                     else "${shownItems.size} / ${browser.items.size} 个项目",
                     fontSize = 12.sp, color = MutedText, modifier = Modifier.weight(1f)
                 )
-                Text(sortLabel(state.prefs.sortKey, state.prefs.sortDir), fontSize = 12.sp, color = MutedText)
+                // 「最近」固定按时间倒序（按日期分区），排序偏好对它不生效，
+                // 显示「名称 · 升序」会自相矛盾。
+                if (!browser.groupByDate) {
+                    Text(sortLabel(state.prefs.sortKey, state.prefs.sortDir), fontSize = 12.sp, color = MutedText)
+                }
             }
-            if (state.nameFilter.isNotBlank()) ActiveFilterBar(vm)
+            if (filtering) ActiveFilterBar(vm)
             // 手机完全没网时，页内提示条与空态都换成真正的原因：
             // 「请检查网络」在没网时是句废话——网络本身没问题，是根本没连上；
             // 用户照着它去怀疑地址、端口、服务器，全都白费。
@@ -351,18 +377,34 @@ fun BrowserScreen(state: MyFileBoxState, vm: AppViewModel) {
                     }
                 }
             }
-            if (!selecting && state.clipboard != null && !vm.canPasteHere() && !clipboardHintDismissed) {
+            // 「最近 / 收藏」是展示视图，本来就不能粘贴，别再挂「只能同一端内粘贴」——
+            // 那句话会让用户以为换个端就能贴进来。
+            if (!selecting && state.clipboard != null && !vm.canPasteHere() &&
+                !vm.browserIsVirtual() && !clipboardHintDismissed
+            ) {
                 Row(
                     Modifier.fillMaxWidth().padding(horizontal = 20.dp).padding(bottom = 4.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        "${vm.clipboardLabel()} · 只能在同一端内粘贴，跨端请用上传 / 下载",
+                        if (vm.isPasteSourceHere()) "${vm.clipboardLabel()} · 已在来源目录，换个位置再粘贴"
+                        else "${vm.clipboardLabel()} · 只能在同一端内粘贴，跨端请用上传 / 下载",
                         fontSize = 12.sp,
                         color = MaterialTheme.colorScheme.primary,
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f)
+                    )
+                    Text(
+                        "取消",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier
+                            .clickable {
+                                vm.cancelClipboard()
+                                clipboardHintDismissed = true
+                            }
+                            .padding(start = 6.dp, end = 4.dp, top = 4.dp, bottom = 4.dp)
                     )
                     IconButton(
                         onClick = { clipboardHintDismissed = true },
@@ -380,10 +422,10 @@ fun BrowserScreen(state: MyFileBoxState, vm: AppViewModel) {
                 if (shownItems.isEmpty() && !state.loading) {
                     val readFailed = !state.localAccess && browser.ctx == FileContext.LOCAL
                     when {
-                        state.nameFilter.isNotBlank() -> EmptyState(
+                        filtering -> EmptyState(
                             icon = Icons.Outlined.Folder,
                             title = "没有匹配的项目",
-                            message = "当前筛选「${state.nameFilter}」",
+                            message = filterSummary(state.nameFilter, state.extensionFilter),
                             actionLabel = "清除筛选",
                             onAction = vm::clearNameFilter
                         )
@@ -598,16 +640,7 @@ fun BrowserScreen(state: MyFileBoxState, vm: AppViewModel) {
             )
         }
 
-        // 压缩/解压进度条：本地文件浏览的每一层级都显示，可取消。
-        if (state.localTaskRunning && browser.ctx == FileContext.LOCAL) {
-            LocalTaskBar(
-                state.localTaskLabel,
-                Modifier.align(Alignment.BottomCenter).padding(bottom = if (selecting) 70.dp else 0.dp)
-            ) {
-                vm.cancelLocalTask()
-            }
         }
-    }
 
     if (showMore) {
         val chosen = browser.items.filter { it.id in state.selected }
@@ -681,9 +714,9 @@ fun BrowserScreen(state: MyFileBoxState, vm: AppViewModel) {
     if (showCompress) {
         CompressDialog(
             defaultName = compressDefaultName,
-            onConfirm = { name, format ->
+            onConfirm = { name, format, password ->
                 showCompress = false
-                vm.compressSelected(name, format)
+                vm.compressSelected(name, format, password)
             },
             onDismiss = { showCompress = false }
         )
@@ -1023,6 +1056,8 @@ private fun RecentGroupHeader(label: String) {
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
+// 内部 produceState 在 null 分支里直接 return@produceState，lint 因此判定「从不赋值」。
+@Suppress("ProduceStateDoesNotAssignValue")
 @Composable
 fun TransferSheet(state: MyFileBoxState, vm: AppViewModel) {
     val request = state.transfer ?: return
@@ -1100,39 +1135,18 @@ fun TransferSheet(state: MyFileBoxState, vm: AppViewModel) {
                 stack.forEach { add(it to it.label) }
                 currentVal?.let { add(it to it.label) }
             }
-            Row(
-                Modifier.fillMaxWidth().padding(top = 12.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                crumbs.forEachIndexed { index, (dest, label) ->
-                    val isLast = index == crumbs.lastIndex
-                    Text(
-                        label,
-                        fontSize = 12.sp,
-                        fontWeight = if (isLast) FontWeight.SemiBold else FontWeight.Normal,
-                        color = if (isLast) MaterialTheme.colorScheme.primary else MutedText,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(6.dp))
-                            .clickable {
-                                if (!isLast) {
-                                    // 点面包屑回到该层：截断路径栈。
-                                    // crumbs[0]=全部位置；crumbs[k](k>=1) 对应 stack[k-1]。
-                                    stack = if (index == 0) emptyList() else stack.take(index - 1)
-                                    current = dest
-                                    selectedTarget = dest
-                                    showNewFolder = false
-                                }
-                            }
-                            .padding(horizontal = 3.dp, vertical = 2.dp)
-                    )
-                    if (!isLast) {
-                        Icon(Icons.Outlined.ChevronRight, null, tint = MutedText, modifier = Modifier.size(13.dp))
-                    }
+            // 与浏览页 / 搜索位置选择共用同一套取舍：空间不够只丢外层，不截半个名字。
+            PathBreadcrumbs(
+                labels = crumbs.map { it.second },
+                modifier = Modifier.padding(top = 12.dp),
+                onCrumbClick = { index ->
+                    // crumbs[0]=全部位置；crumbs[k](k>=1) 对应 stack[k-1]。
+                    stack = if (index == 0) emptyList() else stack.take(index - 1)
+                    current = crumbs[index].first
+                    selectedTarget = current
+                    showNewFolder = false
                 }
-                Spacer(Modifier.weight(1f))
-            }
+            )
 
             // 目录列表 / 加载中 / 空态
             if (loading) {

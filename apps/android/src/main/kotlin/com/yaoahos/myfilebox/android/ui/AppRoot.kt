@@ -12,8 +12,6 @@ import androidx.core.graphics.drawable.toBitmap
 import com.yaoahos.myfilebox.android.data.LocalRepository
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.slideInVertically
-import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.SizeTransform
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -37,7 +35,10 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
@@ -56,10 +57,12 @@ import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Apps
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.VideoFile
+import androidx.compose.material.icons.outlined.Unarchive
 import androidx.compose.material.icons.outlined.StarBorder
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.HorizontalDivider
@@ -96,6 +99,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import androidx.compose.ui.window.Dialog
 import androidx.core.view.WindowCompat
@@ -107,6 +111,8 @@ import com.yaoahos.myfilebox.core.FileKind
 import java.io.File
 import com.yaoahos.myfilebox.core.ThemeMode
 import com.yaoahos.myfilebox.core.TabKey
+import com.yaoahos.myfilebox.core.effectiveDefaultTab
+import com.yaoahos.myfilebox.android.ui.theme.semanticColors
 
 @Composable
 fun MyFileBoxApp(viewModel: AppViewModel) {
@@ -155,6 +161,11 @@ fun MyFileBoxApp(viewModel: AppViewModel) {
                 // 端点还停在内网地址、而手机已经不在内网，就立刻换通道重连。
                 viewModel.healSynoChannelOnForeground()
             }
+            if (event == Lifecycle.Event.ON_STOP) {
+                // 用户在「正在打开」期间直接退出 / 按 Home 离开：取消下载并清掉
+                // 半截缓存，否则下次进来看不到进度，缓存目录却堆着无人认领的临时文件。
+                viewModel.cancelOpeningOnExit()
+            }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
@@ -173,25 +184,36 @@ fun MyFileBoxApp(viewModel: AppViewModel) {
 
     // 所有成功 / 失败 / 普通提示统一走这个顶部浮层：不黑底、不占位、不打断操作。
     val notice = state.message
+    // 「打开方式」里选「用 MyFileBox 解压」后要弹的解压位置对话框：
+    // 放在根组合里，任何入口（首页 / 目录 / 搜索结果）都能复用同一个对话框。
+    var extractTarget by remember { mutableStateOf<FileEntry?>(null) }
+    // 记住了「始终用自带解压」时，点压缩包不再经过「打开方式」，由 ViewModel 直接抛来
+    // 待解压文件；这里接住并立刻清空，重组时不会反复弹窗。
+    LaunchedEffect(state.extractRequest) {
+        state.extractRequest?.let {
+            extractTarget = it
+            viewModel.consumeExtractRequest()
+        }
+    }
     LaunchedEffect(notice) {
         if (notice != null) {
-            // 停留时长跟着字数走：两三个字一闪而过没负担，长句也不会读到一半消失。
-            val base = if (noticeTone(notice) == NoticeTone.ERROR) 3_500L else 2_000L
-            val extra = (notice.length * 60L).coerceAtMost(4_000L)
-            kotlinx.coroutines.delay(base + extra)
+            kotlinx.coroutines.delay(noticeDurationMs(notice))
             viewModel.consumeMessage(notice)
         }
     }
 
-    // 侧滑返回规则（清单 11/12）：编辑登录未保存 → 回群晖首页；第二、三栏首页 → 回第一栏首页；
-    // 只有第一栏首页才交还系统退出。
-    val firstTab = viewModel.visibleTabs().firstOrNull()
+    // 启动页口径：返回链的最后一站是「有效默认启动页」，不是固定的第一栏。
+    // 用户在设置里改了默认启动页后，从任意页面一路返回应停在那一栏，再按一次才退出。
+    val homeTab = effectiveDefaultTab(state.prefs)
+    // 首页筛选中不算「可退出的首页」：此时返回键要先清掉筛选（见 performBack），
+    // 否则 canGoBack=false 会让系统直接退出到桌面，筛选条件还留着。
+    val homeFilterOn = state.nameFilter.isNotBlank() || state.extensionFilter.isNotBlank()
     val atMainHome = state.screen == Screen.MAIN && state.browser == null && state.search == null &&
         !state.recycleOpen && !state.transferCenterOpen && state.transfer == null &&
         state.fileSheet == null && state.preview == null && state.openWith == null &&
         state.pendingDelete.isEmpty() && state.pendingDeleteConnection == null && !state.homeSelecting &&
-        !state.shareManagerOpen
-    val exitToDesktop = atMainHome && !state.connectionEditing && state.tab == firstTab
+        !state.shareManagerOpen && !homeFilterOn
+    val exitToDesktop = atMainHome && !state.connectionEditing && state.tab == homeTab
     // 系统返回键与左边缘手势返回共用同一个动作，保证优先级完全一致、不会出现两种返回行为。
     // 分支顺序严格对齐 pageKeyOf：返回永远作用于「当前显示的页面」，绝不能被
     // 显示在下层的状态抢走（3.9.18 修「设置页偶发要侧滑两次才能退出」的根因：
@@ -218,14 +240,17 @@ fun MyFileBoxApp(viewModel: AppViewModel) {
             // 浏览页多选：与 BrowserScreen 内部的 BackHandler 对齐，先清多选再退页面。
             state.browser != null && (state.selectionActive || state.selected.isNotEmpty()) -> viewModel.clearSelection()
             state.browser != null -> viewModel.backFromBrowser()
+            // 首页筛选中：返回先清筛选，而不是直接退出 / 回第一栏。
+            // 必须放在 browser 分支之后——浏览页自己的返回由 backFromBrowser 清筛选。
+            state.screen == Screen.MAIN && homeFilterOn -> viewModel.clearNameFilter()
             // 编辑登录：没保存就返回时回到群晖文件首页，不退到桌面（清单 11）。
             state.connectionEditing -> viewModel.cancelConnectionEditing()
             // 首页多选时返回键先退出选择态，不要直接退出应用。
             state.homeSelecting -> viewModel.clearHomeSelection()
             state.screen == Screen.MAIN && state.screenStack.isNotEmpty() -> viewModel.closeScreen()
             state.screen != Screen.MAIN -> viewModel.closeScreen()
-            // 二、三栏首页：回第一栏首页（清单 12）。
-            else -> viewModel.backToFirstTab()
+            // 其它栏首页：回有效默认启动页（设置里可改，不再固定回第一栏）。
+            else -> viewModel.backToHomeTab()
         }
     }
     // 系统返回键 / Android 13+ 预测式返回统一由 PageHost 内的 PredictiveBackHandler 接管，
@@ -235,7 +260,9 @@ fun MyFileBoxApp(viewModel: AppViewModel) {
     pageSnapshots[pageKey] = state
     while (pageSnapshots.size > 8) pageSnapshots.remove(pageSnapshots.keys.firstOrNull())
 
-    val thumbLoader: RemoteThumbLoader = { file -> viewModel.remoteThumbnail(file) }
+    // staticCompositionLocalOf 的 value 一变就重组全部读取点；每次组合都新建这个 lambda
+    // 会让任意 state.copy 都重建所有 FileThumb。按 viewModel 记住实例即可。
+    val thumbLoader: RemoteThumbLoader = remember(viewModel) { { file -> viewModel.remoteThumbnail(file) } }
     MyFileBoxTheme(
         accent = state.prefs.theme.accent,
         dynamic = state.prefs.theme.dynamic,
@@ -258,43 +285,77 @@ fun MyFileBoxApp(viewModel: AppViewModel) {
                 Modifier.fillMaxSize().padding(padding),
                 contentAlignment = Alignment.TopCenter
             ) {
-                Box(
-                    Modifier
-                        .widthIn(max = 900.dp)
-                        .fillMaxHeight()
-                        .fillMaxWidth()
-                ) {
-                    // 软件内所有页面共用这唯一一个宿主、唯一一套转场。
-                    // 不区分底栏 / 首页 / 里层 / 覆盖页，一律按「页面」处理。
-                    PageHost(
-                        pageKey = pageKey,
-                        canGoBack = !exitToDesktop,
-                        onBack = performBack,
-                        snapshots = pageSnapshots,
-                        liveState = state,
-                        vm = viewModel
-                    )
-                    // 固定底栏：画在页面宿主之外，不参与任何页面水平位移。
-                    // 切换底栏时只有选中态瞬时更新，这一整块区域始终原地不动；
-                    // 进出非首页页面用极短的淡入淡出，避免底部出现空白闪一下。
-                    AnimatedVisibility(
-                        visible = isHomePageKey(pageKey),
-                        enter = fadeIn(tween(120)),
-                        exit = fadeOut(tween(120)),
-                        modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth()
-                    ) {
-                        FixedBottomBar(state, viewModel, state.tab)
-                    }
-                }
-                NoticeBanner(
-                    text = notice,
-                    onDismiss = { notice?.let(viewModel::consumeMessage) },
-                    modifier = Modifier
-                        .align(Alignment.TopCenter)
-                        .statusBarsPadding()
-                        .padding(horizontal = 14.dp)
-                        .padding(top = 6.dp)
+                // 页面与底栏共用整屏宽度。此前这里套了一层 widthIn(max = 900.dp) 的
+                // 居中容器，平板 / 横屏上两侧会露出大块 background 色留白，且底栏被
+                // 一起限宽成一条居中的实心横条；现在改为铺满，留白与横条一并消失。
+                // 软件内所有页面共用这唯一一个宿主、唯一一套转场。
+                // 不区分底栏 / 首页 / 里层 / 覆盖页，一律按「页面」处理。
+                PageHost(
+                    pageKey = pageKey,
+                    canGoBack = !exitToDesktop,
+                    onBack = performBack,
+                    snapshots = pageSnapshots,
+                    liveState = state,
+                    vm = viewModel
                 )
+                // 固定底栏：画在页面宿主之外，不参与任何页面水平位移。
+                // 宽度由 FixedBottomBar 内部收敛为居中胶囊，宽屏也不会拉成横贯色块；
+                // 切换底栏时只有选中态瞬时更新，这一整块区域始终原地不动；
+                // 进出非首页页面用极短的淡入淡出，避免底部出现空白闪一下。
+                AnimatedVisibility(
+                    visible = isHomePageKey(pageKey),
+                    enter = fadeIn(tween(120)),
+                    exit = fadeOut(tween(120)),
+                    modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth()
+                ) {
+                    FixedBottomBar(state, viewModel, state.tab)
+                }
+                // 顶部浮层：进度类与提示类互斥共用一个位置，永远是「一条通知」。
+                //
+                // 之前两者放同一个 Column 垂直堆叠：点文件打开时进度条出现、提示条
+                // 同时淡出，AnimatedVisibility 退出的 140ms 里提示条仍占位，动画一结束
+                // 提示条被移除，进度条瞬间上移一截——用户看到的就是「界面往上跳一下」。
+                // 改成互斥后顶部永远只有一个浮层、位置恒定，不再互相推挤。
+                //
+                // 本地耗时任务（删除 / 还原 / 压缩 / 解压 / 粘贴）原本画在底部，
+                // 同一屏上下两条浮层各说各的；现在统一收进顶部通知位，优先级：
+                // 正在打开 > 本地任务 > 普通提示。
+                val opening = state.openingFile
+                val taskLabel = state.localTaskLabel.takeIf { state.localTaskRunning && it.isNotBlank() }
+                when {
+                    opening != null -> OpeningFileBar(
+                        // 在线打开大文件时的可见进度：下载在后台进行，没有这条进度条
+                        // 用户会以为「点了没反应」而反复点击、甚至直接退出。带取消按钮，
+                        // 点取消即中断下载并清掉缓存的半截文件。
+                        opening = opening,
+                        modifier = Modifier
+                            .align(Alignment.TopCenter)
+                            .statusBarsPadding()
+                            .padding(horizontal = 14.dp)
+                            .padding(top = 6.dp),
+                        onCancel = { viewModel.cancelOpening() }
+                    )
+                    taskLabel != null -> TaskBanner(
+                        label = taskLabel,
+                        onCancel = if (viewModel.isLocalTaskCancellable()) {
+                            ({ viewModel.cancelLocalTask() })
+                        } else null,
+                        modifier = Modifier
+                            .align(Alignment.TopCenter)
+                            .statusBarsPadding()
+                            .padding(horizontal = 14.dp)
+                            .padding(top = 6.dp)
+                    )
+                    else -> NoticeBanner(
+                        text = notice,
+                        onDismiss = { notice?.let(viewModel::consumeMessage) },
+                        modifier = Modifier
+                            .align(Alignment.TopCenter)
+                            .statusBarsPadding()
+                            .padding(horizontal = 14.dp)
+                            .padding(top = 6.dp)
+                    )
+                }
             }
         }
         if (state.transfer != null) TransferSheet(state, viewModel)
@@ -315,7 +376,7 @@ fun MyFileBoxApp(viewModel: AppViewModel) {
                 title = { Text("删除确认") },
                 text = { Text(deleteText) },
                 confirmButton = {
-                    TextButton(onClick = viewModel::confirmDelete) { Text("删除", color = Color(0xFFE25C5C)) }
+                    TextButton(onClick = viewModel::confirmDelete) { Text("删除", color = MaterialTheme.colorScheme.error) }
                 },
                 dismissButton = { TextButton(onClick = viewModel::cancelDelete) { Text("取消") } }
             )
@@ -327,7 +388,7 @@ fun MyFileBoxApp(viewModel: AppViewModel) {
                 title = { Text("删除网络位置") },
                 text = { Text("确定删除「${pendingConnection.name}」吗？只会删除 App 中保存的连接配置，不会删除服务器文件。") },
                 confirmButton = {
-                    TextButton(onClick = viewModel::confirmDeleteConnection) { Text("删除", color = Color(0xFFE25C5C)) }
+                    TextButton(onClick = viewModel::confirmDeleteConnection) { Text("删除", color = MaterialTheme.colorScheme.error) }
                 },
                 dismissButton = { TextButton(onClick = viewModel::cancelDelete) { Text("取消") } }
             )
@@ -380,6 +441,15 @@ fun MyFileBoxApp(viewModel: AppViewModel) {
                                 "下载中 ${state.updateProgress}%",
                                 fontSize = 12.sp,
                                 color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.padding(top = 10.dp)
+                            )
+                        }
+                        if (state.updateError != null) {
+                            Text(
+                                state.updateError.orEmpty(),
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.error,
+                                lineHeight = 17.sp,
                                 modifier = Modifier.padding(top = 10.dp)
                             )
                         }
@@ -479,9 +549,44 @@ fun MyFileBoxApp(viewModel: AppViewModel) {
                 file = file,
                 apps = state.openWithApps,
                 loading = state.openWithLoading,
+                // 自带解压只对本地压缩包显示：远端文件还挂在协议上，
+                // 解压要先下载，走的是另一条链路。
+                canExtract = viewModel.canExtractLocally(file),
                 onDismiss = viewModel::closeOpenWith,
                 onLaunch = { viewModel.launchWith(it) },
-                onLaunchAlways = { viewModel.launchWith(it, rememberForType = true) }
+                onLaunchAlways = { viewModel.launchWith(it, rememberForType = true) },
+                onExtract = {
+                    viewModel.closeOpenWith()
+                    extractTarget = file
+                },
+                onExtractAlways = { viewModel.extractAlways(file) }
+            )
+        }
+        extractTarget?.let { target ->
+            ExtractDialog(
+                rootPath = state.localRoot,
+                listSubfolders = viewModel::downloadSubfolders,
+                onConfirm = { dest ->
+                    extractTarget = null
+                    viewModel.extractArchive(target, dest)
+                },
+                onDismiss = { extractTarget = null }
+            )
+        }
+        // 解压前发现同名文件：等用户选覆盖 / 跳过 / 两份都留。
+        state.extractConflict?.let { prompt ->
+            ExtractConflictDialog(
+                prompt = prompt,
+                onChoose = { viewModel.confirmExtractConflict(it) },
+                onDismiss = { viewModel.cancelExtractConflict() }
+            )
+        }
+        // 加密 7z：先要密码，再按普通流程扫冲突并解压。
+        state.extractPassword?.let { prompt ->
+            ExtractPasswordDialog(
+                prompt = prompt,
+                onConfirm = { viewModel.confirmExtractPassword(it) },
+                onDismiss = { viewModel.cancelExtractPassword() }
             )
         }
         }
@@ -597,7 +702,8 @@ private fun PreviewDialog(file: FileEntry, onClose: () -> Unit) {
             Column(Modifier.padding(18.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("文件预览", fontSize = 18.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
-                    IconButton(onClick = onClose, modifier = Modifier.size(30.dp)) {
+                    // 触控区放大到 48dp（图标本身仍是 18dp），避免误点空白。
+                    IconButton(onClick = onClose, modifier = Modifier.size(48.dp)) {
                         Icon(Icons.Outlined.Close, "关闭", modifier = Modifier.size(18.dp))
                     }
                 }
@@ -760,9 +866,12 @@ private fun OpenWithDialog(
     file: FileEntry,
     apps: List<OpenApp>,
     loading: Boolean,
+    canExtract: Boolean,
     onDismiss: () -> Unit,
     onLaunch: (String) -> Unit,
-    onLaunchAlways: (String) -> Unit
+    onLaunchAlways: (String) -> Unit,
+    onExtract: () -> Unit,
+    onExtractAlways: () -> Unit
 ) {
     val context = LocalContext.current
     AlertDialog(
@@ -783,6 +892,55 @@ private fun OpenWithDialog(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.padding(start = 8.dp)
+                    )
+                }
+                if (canExtract) {
+                    // 自带解压排在已安装应用前面：压缩包的首要动作通常是解开，
+                    // 而系统列表里往往只有一个「文件」应用，点进去还要再绕一圈。
+                    // 行样式与应用行一致，右侧同样有「始终」星标——用户不用再猜
+                    // 「为什么这个能记住、那个不能」。
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .clickable(onClick = onExtract)
+                            .padding(vertical = 7.dp, horizontal = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            Modifier.size(34.dp).clip(RoundedCornerShape(9.dp))
+                                .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.6f)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                Icons.Outlined.Unarchive,
+                                null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(19.dp)
+                            )
+                        }
+                        Text(
+                            "用 MyFileBox 解压",
+                            fontSize = 13.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f).padding(start = 12.dp)
+                        )
+                        IconButton(
+                            onClick = onExtractAlways,
+                            modifier = Modifier.size(34.dp)
+                        ) {
+                            Icon(
+                                Icons.Outlined.StarBorder,
+                                "始终用 MyFileBox 解压",
+                                tint = MutedText,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                    }
+                    HorizontalDivider(
+                        color = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f),
+                        modifier = Modifier.padding(vertical = 4.dp)
                     )
                 }
                 if (loading) {
@@ -811,7 +969,9 @@ private fun OpenWithDialog(
                     lineHeight = 16.sp,
                     modifier = Modifier.padding(bottom = 4.dp)
                 )
-                Column(Modifier.heightIn(max = 320.dp).verticalScroll(rememberScrollState())) {
+                // 高度放宽到 420dp：只声明通配的万能查看器（WPS 等）排在具体应用之后，
+                // 320dp 时代它们会被挤出可视区，用户以为「列表里没有 WPS」。
+                Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState())) {
                     apps.forEach { app ->
                         val icon = remember(app.pkg) {
                             runCatching {
@@ -902,14 +1062,34 @@ private fun OpenWithDialog(
 
 enum class NoticeTone { INFO, SUCCESS, WARN, ERROR }
 
+private const val NOTICE_BASE_MS = 1_200L
+private const val NOTICE_ERROR_BASE_MS = 2_400L
+private const val NOTICE_EXTRA_PER_CHAR_MS = 35L
+private const val NOTICE_EXTRA_MAX_MS = 1_600L
+
+/**
+ * 顶部提示停留时长。原先 2/3.5 秒底 + 每字 60ms（上限 4 秒）会让一句普通
+ * 成功提示挂 2.6 秒、长错误提示接近 7 秒，挡住内容又不好手动关。
+ * 现在普通提示约 1.5~2.8 秒，错误约 2.7~4 秒，长句仍有额外阅读时间。
+ */
+internal fun noticeDurationMs(text: String): Long {
+    val base = if (noticeTone(text) == NoticeTone.ERROR) NOTICE_ERROR_BASE_MS else NOTICE_BASE_MS
+    val extra = (text.length * NOTICE_EXTRA_PER_CHAR_MS).coerceAtMost(NOTICE_EXTRA_MAX_MS)
+    return base + extra
+}
+
 /**
  * 文案分类只影响颜色和停留时长，不改变任何业务逻辑。
  * 失败类优先匹配，避免「已删除 0 项，操作失败」被判成成功。
  */
-private fun noticeTone(text: String): NoticeTone = when {
+internal fun noticeTone(text: String): NoticeTone = when {
     listOf(
         "失败", "错误", "无法", "不能", "未找到", "未读取", "请先", "请填写", "请检查",
-        "已过期", "不存在", "超时", "不可用", "拒绝", "离线", "未登录", "密码错误"
+        "已过期", "不存在", "超时", "不可用", "拒绝", "离线", "未登录", "密码错误",
+        "不支持", "仅支持", "没有可打开", "没有应用",
+        // 传输记录点开时目标文件 / 文件夹已被删：必须判红，否则「…已被移动或删除」
+        // 会被下面的 startsWith("已") 误判成绿色成功色，用户看不出是失败。
+        "已被移动或删除", "已删除", "已丢失", "找不到该"
     ).any { text.contains(it) } -> NoticeTone.ERROR
     text.contains("成功") || text.contains("完成") || text.contains("可用") ||
         text.startsWith("已") -> NoticeTone.SUCCESS
@@ -921,6 +1101,142 @@ private fun noticeTone(text: String): NoticeTone = when {
  * 顶部提示浮层：圆角卡片 + 状态色图标，宽度受限、自动消失、点一下也能关。
  * 它只是叠在内容上方的一小块，不整屏遮罩，所以不影响继续操作。
  */
+/** 在线打开大文件的进度条：显示文件名 + 进度 + 取消按钮，避免用户以为卡住而反复点击 / 退出。 */
+@Composable
+private fun OpeningFileBar(opening: OpeningFile, onCancel: () -> Unit, modifier: Modifier = Modifier) {
+    val fraction = if (opening.hasByteProgress && opening.totalBytes > 0L)
+        (opening.completedBytes.toFloat() / opening.totalBytes.toFloat()).coerceIn(0f, 1f)
+    else -1f
+    Surface(
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.surface,
+        shadowElevation = 10.dp,
+        border = androidx.compose.foundation.BorderStroke(
+            1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.35f)
+        ),
+        modifier = modifier.widthIn(max = 560.dp)
+    ) {
+        Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(16.dp),
+                    strokeWidth = 2.dp,
+                    color = MaterialTheme.colorScheme.primary
+                )
+                Text(
+                    "正在打开「${opening.name}」",
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(start = 9.dp).weight(1f)
+                )
+                TextButton(onClick = onCancel, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)) {
+                    Text("取消", fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
+                }
+            }
+            Spacer(Modifier.height(6.dp))
+            if (fraction >= 0f) {
+                LinearProgressIndicator(
+                    progress = { fraction },
+                    modifier = Modifier.fillMaxWidth().height(5.dp),
+                    color = MaterialTheme.colorScheme.primary,
+                    trackColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)
+                )
+                Text(
+                    "${LocalRepository.formatSize(opening.completedBytes)} / " +
+                        LocalRepository.formatSize(opening.totalBytes),
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 3.dp)
+                )
+            } else {
+                LinearProgressIndicator(
+                    modifier = Modifier.fillMaxWidth().height(5.dp),
+                    color = MaterialTheme.colorScheme.primary,
+                    trackColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)
+                )
+                Text(
+                    "正在缓存到本机，请稍候…",
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 3.dp)
+                )
+            }
+        }
+    }
+}
+
+/**
+ * 进行中的本地任务（删除 / 还原 / 压缩 / 解压 / 粘贴）。
+ *
+ * 结构、圆角、阴影、内边距与 [NoticeBanner] 完全一致——它就是「顶部通知」的
+ * 另一种状态；只把强调色从提示条的 primary/error 换成 tertiary，让「还在跑」
+ * 和「跑完了」在同一个位置上一眼可分。左侧转圈代替提示条的静态图标。
+ */
+@Composable
+private fun TaskBanner(label: String, onCancel: (() -> Unit)?, modifier: Modifier = Modifier) {
+    // 短操作（删几个小文件）几十毫秒就结束，进度条一闪而过反而像界面抽了一下。
+    // 延迟 300ms 再出现：期间操作若已完成，这个组件会被移出组合，用户什么也看不到。
+    var visible by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        delay(300)
+        visible = true
+    }
+    AnimatedVisibility(
+        visible = visible,
+        enter = fadeIn(tween(150)),
+        exit = fadeOut(tween(140)),
+        modifier = modifier
+    ) {
+        val accent = MaterialTheme.colorScheme.tertiary
+        Surface(
+            shape = RoundedCornerShape(16.dp),
+            color = MaterialTheme.colorScheme.surface,
+            shadowElevation = 10.dp,
+            border = androidx.compose.foundation.BorderStroke(1.dp, accent.copy(alpha = 0.35f)),
+            modifier = Modifier.widthIn(max = 560.dp)
+        ) {
+            Row(
+                Modifier.padding(horizontal = 13.dp, vertical = 11.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(
+                    Modifier
+                        .size(26.dp)
+                        .clip(CircleShape)
+                        .background(accent.copy(alpha = 0.13f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(14.dp),
+                        strokeWidth = 2.dp,
+                        color = accent
+                    )
+                }
+                Text(
+                    label,
+                    fontSize = 13.sp,
+                    lineHeight = 18.sp,
+                    modifier = Modifier
+                        .weight(1f, fill = false)
+                        .padding(start = 10.dp)
+                )
+                if (onCancel != null) {
+                    TextButton(
+                        onClick = onCancel,
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                        modifier = Modifier.height(28.dp)
+                    ) {
+                        Text("取消", fontSize = 12.sp, color = accent)
+                    }
+                }
+            }
+        }
+    }
+}
+
 @Composable
 private fun NoticeBanner(text: String?, onDismiss: () -> Unit, modifier: Modifier = Modifier) {
     var shown by remember { mutableStateOf("") }
@@ -937,14 +1253,17 @@ private fun NoticeBanner(text: String?, onDismiss: () -> Unit, modifier: Modifie
     }
     AnimatedVisibility(
         visible = visible,
-        enter = fadeIn(tween(150)) + slideInVertically(tween(200)) { -it / 2 },
-        exit = fadeOut(tween(140)) + slideOutVertically(tween(160)) { -it / 2 },
+        // 纯淡入淡出：提示条带垂直位移（slideInVertically）时，出现/消失那一下
+        // 会把下方内容往上拽一截，用户看到的就是「点开文件时界面往上跳一下」。
+        // 顶部浮层只做透明度变化，位置始终固定，不再牵动视觉。
+        enter = fadeIn(tween(150)),
+        exit = fadeOut(tween(140)),
         modifier = modifier
     ) {
         val tone = noticeTone(shown)
         val accent = when (tone) {
-            NoticeTone.ERROR -> Color(0xFFE25C5C)
-            NoticeTone.SUCCESS -> Color(0xFF1AA874)
+            NoticeTone.ERROR -> MaterialTheme.colorScheme.error
+            NoticeTone.SUCCESS -> semanticColors().online
             NoticeTone.WARN -> Color(0xFFE8A23B)
             NoticeTone.INFO -> MaterialTheme.colorScheme.primary
         }

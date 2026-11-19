@@ -1,5 +1,7 @@
 package com.yaoahos.myfilebox.android.ui
 
+import com.yaoahos.myfilebox.core.displayLeaf
+
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.rememberScrollState
@@ -20,8 +22,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.runtime.produceState
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.activity.compose.BackHandler
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
@@ -29,9 +31,18 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.ContentCopy
+import androidx.compose.material.icons.outlined.Delete
+import androidx.compose.material.icons.outlined.Download
+import androidx.compose.material.icons.outlined.DriveFileMove
 import androidx.compose.material.icons.outlined.Folder
+import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.outlined.MoreHoriz
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material.icons.outlined.Share
+import androidx.compose.material.icons.outlined.StarBorder
+import androidx.compose.material.icons.outlined.Upload
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -58,6 +69,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
+// 目录选择里的 produceState 首帧就是 `value = null` 后返回，lint 判成「从不赋值」。
+@Suppress("ProduceStateDoesNotAssignValue")
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
 fun SearchScreen(state: MyFileBoxState, vm: AppViewModel) {
@@ -93,6 +106,16 @@ fun SearchScreen(state: MyFileBoxState, vm: AppViewModel) {
     }
     val searching = search.query != debouncedQuery
     val folderLabel = search.folderLabel.ifBlank { "所有位置" }
+    // 搜索结果排序：默认按修改时间倒序（最近动过的先看到），可切名称 / 大小。
+    var sortKey by remember { mutableStateOf("time") }
+    var sortDir by remember { mutableStateOf("desc") }
+    val ordered = remember(results, sortKey, sortDir) { vm.sortFiles(results, sortKey, sortDir) }
+    // 多选：结果不在 browser.items 里，勾选单独存在 state.searchSelected（键 = 路径 + 名称）。
+    val selecting = state.searchSelecting
+    val allSelected = ordered.isNotEmpty() &&
+        state.searchSelected.containsAll(ordered.map { vm.searchKeyOf(it) })
+    var showMore by remember { mutableStateOf(false) }
+    BackHandler(enabled = selecting) { vm.clearSearchSelection() }
 
     // 与其它文件列表页统一：整页下拉刷新（重算搜索结果）。
     AppPullToRefreshBox(
@@ -104,7 +127,8 @@ fun SearchScreen(state: MyFileBoxState, vm: AppViewModel) {
         Modifier
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
-            .statusBarsPadding()
+            // 稳定的状态栏高度：点文件启动外部应用时 insets 会抖小，整页会跳一下。
+            .padding(top = rememberStableStatusBarTop())
             .imePadding()
             .pullRefreshArea()
     ) {
@@ -113,41 +137,74 @@ fun SearchScreen(state: MyFileBoxState, vm: AppViewModel) {
             verticalAlignment = Alignment.CenterVertically
         ) {
             Surface(shape = CircleShape, color = MaterialTheme.colorScheme.surface, modifier = Modifier.size(36.dp)) {
-                IconButton(onClick = vm::closeSearch, modifier = Modifier.size(36.dp)) {
-                    Icon(Icons.Outlined.ArrowBack, "返回", modifier = Modifier.size(18.dp))
+                IconButton(
+                    onClick = { if (selecting) vm.clearSearchSelection() else vm.closeSearch() },
+                    modifier = Modifier.size(36.dp)
+                ) {
+                    Icon(
+                        if (selecting) Icons.Outlined.Close else Icons.Outlined.ArrowBack,
+                        if (selecting) "退出选择" else "返回",
+                        modifier = Modifier.size(18.dp)
+                    )
                 }
             }
-            OutlinedTextField(
-                value = search.query,
-                onValueChange = vm::setSearchQuery,
-                modifier = Modifier.weight(1f).padding(start = 8.dp).imePadding(),
-                placeholder = {
+            if (selecting) {
+                // 选择态：顶栏换成标题 + 全选，搜索框先让位（继续输入没有意义）。
+                Column(Modifier.weight(1f).padding(start = 11.dp)) {
                     Text(
-                        when (search.ctx) {
-                            FileContext.LOCAL -> "搜索本地文件"
-                            FileContext.SYNO -> "搜索群晖文件"
-                            FileContext.NET -> "搜索网络文件"
-                        },
-                        fontSize = 12.sp
+                        "已选择 ${state.searchSelected.size} 项",
+                        fontSize = 19.sp,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
-                },
-                singleLine = true,
-                shape = RoundedCornerShape(14.dp),
-                colors = dialogFieldColors(),
-                leadingIcon = { Icon(Icons.Outlined.Search, null, modifier = Modifier.size(17.dp)) },
-                trailingIcon = {
-                    if (search.query.isNotEmpty()) {
-                        IconButton(onClick = { vm.setSearchQuery("") }, modifier = Modifier.size(30.dp)) {
-                            Icon(Icons.Outlined.Close, "清除", modifier = Modifier.size(16.dp))
+                    Text(
+                        SELECTING_HINT,
+                        fontSize = 12.sp,
+                        color = MutedText,
+                        maxLines = 1
+                    )
+                }
+                SelectionSelectAllButton(
+                    allSelected = allSelected,
+                    onClick = {
+                        vm.setSearchSelection(ordered.map { vm.searchKeyOf(it) }.toSet())
+                    }
+                )
+            } else {
+                OutlinedTextField(
+                    value = search.query,
+                    onValueChange = vm::setSearchQuery,
+                    modifier = Modifier.weight(1f).padding(start = 8.dp).imePadding(),
+                    placeholder = {
+                        Text(
+                            when (search.ctx) {
+                                FileContext.LOCAL -> "搜索本地文件"
+                                FileContext.SYNO -> "搜索群晖文件"
+                                FileContext.NET -> "搜索网络文件"
+                            },
+                            fontSize = 12.sp
+                        )
+                    },
+                    singleLine = true,
+                    shape = RoundedCornerShape(14.dp),
+                    colors = dialogFieldColors(),
+                    leadingIcon = { Icon(Icons.Outlined.Search, null, modifier = Modifier.size(17.dp)) },
+                    trailingIcon = {
+                        if (search.query.isNotEmpty()) {
+                            IconButton(onClick = { vm.setSearchQuery("") }, modifier = Modifier.size(30.dp)) {
+                                Icon(Icons.Outlined.Close, "清除", modifier = Modifier.size(16.dp))
+                            }
                         }
                     }
-                }
-            )
-            TextButton(onClick = vm::closeSearch) { Text("取消", fontSize = 12.sp, fontWeight = FontWeight.SemiBold) }
-            HeaderOverflow(vm, search.ctx)
+                )
+                TextButton(onClick = vm::closeSearch) { Text("取消", fontSize = 12.sp, fontWeight = FontWeight.SemiBold) }
+                HeaderOverflow(vm, search.ctx)
+            }
         }
 
-        Row(
+        // 选择态不显示位置 / 后缀两个筛选：改它们会清空勾选，用户会莫名其妙丢选择。
+        if (!selecting) Row(
             Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 3.dp),
             horizontalArrangement = Arrangement.spacedBy(7.dp)
         ) {
@@ -178,6 +235,23 @@ fun SearchScreen(state: MyFileBoxState, vm: AppViewModel) {
                         overflow = TextOverflow.Ellipsis
                     )
                 }
+            )
+            Spacer(Modifier.weight(1f))
+            // 排序放在这一行：顶栏已经有搜索框 + 取消 + 更多，再塞一个图标会把输入框挤没。
+            SortMenuButton(
+                sortKey = sortKey,
+                sortDir = sortDir,
+                onPick = { k, d ->
+                    // 换字段时用该字段自然的初始方向：名称从小到大、时间 / 大小从新（大）到旧（小）。
+                    // 直接沿用上一个字段的方向，会出现「按名称」却是从 Z 到 A 的反直觉结果。
+                    if (k == sortKey) {
+                        sortDir = d
+                    } else {
+                        sortKey = k
+                        sortDir = if (k == "name") "asc" else "desc"
+                    }
+                },
+                showSize = true
             )
         }
 
@@ -226,16 +300,20 @@ fun SearchScreen(state: MyFileBoxState, vm: AppViewModel) {
             }
         } else {
             LazyColumn(
-                contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 24.dp)
+                contentPadding = PaddingValues(
+                    start = 16.dp, end = 16.dp, top = 4.dp,
+                    // 选择态底栏是浮层，列表底部要留出高度，否则最后一行被压住。
+                    bottom = if (selecting) 96.dp else 24.dp
+                )
             ) {
                 itemsIndexed(
-                    results,
-                    key = { _, file -> "${file.path}|${file.name}" }
+                    ordered,
+                    key = { _, file -> vm.searchKeyOf(file) }
                 ) { index, file ->
                     val shape = when {
-                        results.size == 1 -> RoundedCornerShape(20.dp)
+                        ordered.size == 1 -> RoundedCornerShape(20.dp)
                         index == 0 -> RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp)
-                        index == results.lastIndex -> RoundedCornerShape(bottomStart = 20.dp, bottomEnd = 20.dp)
+                        index == ordered.lastIndex -> RoundedCornerShape(bottomStart = 20.dp, bottomEnd = 20.dp)
                         else -> RectangleShape
                     }
                     Column(
@@ -243,18 +321,87 @@ fun SearchScreen(state: MyFileBoxState, vm: AppViewModel) {
                     ) {
                         FileRow(
                             file,
+                            selected = vm.searchKeyOf(file) in state.searchSelected,
+                            selecting = selecting,
+                            onLongClick = { vm.toggleSearchSelected(file) },
                             subtitle = listOf(
-                                friendlyFolder(file.folder),
+                                friendlyFolder(file.folder, state.localRoot),
                                 file.timeLabel,
                                 file.sizeLabel
                             ).filter { it.isNotBlank() }.joinToString(" · "),
                             onMore = null
-                        ) { vm.openSearchResult(file) }
+                        ) {
+                            // 选择态下点一行 = 继续勾选；否则才是打开。
+                            if (selecting) vm.toggleSearchSelected(file) else vm.openSearchResult(file)
+                        }
                     }
                 }
             }
         }
     }
+    }
+
+    if (selecting) {
+        val chosen = ordered.filter { vm.searchKeyOf(it) in state.searchSelected }
+        val hasChosen = chosen.isNotEmpty()
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.BottomCenter) {
+            SelectionActionBar(
+                actions = buildList {
+                    // 搜索结果的「复制 / 移动」走暂存剪贴板：用户接着退出去选目标文件夹粘贴。
+                    add(SelectionAction(Icons.Outlined.ContentCopy, "复制", enabled = hasChosen) {
+                        vm.stageClipboard(TransferMode.COPY, chosen, search.ctx)
+                    })
+                    add(SelectionAction(Icons.Outlined.DriveFileMove, "移动", enabled = hasChosen) {
+                        vm.stageClipboard(TransferMode.MOVE, chosen, search.ctx)
+                    })
+                    add(SelectionAction(Icons.Outlined.Delete, "删除", enabled = hasChosen, danger = true) {
+                        vm.deleteSearchEntries(chosen)
+                    })
+                    add(SelectionAction(Icons.Outlined.MoreHoriz, "更多", enabled = hasChosen) { showMore = true })
+                },
+                modifier = Modifier.align(Alignment.BottomCenter)
+            )
+        }
+    }
+
+    if (showMore) {
+        val chosen = ordered.filter { vm.searchKeyOf(it) in state.searchSelected }
+        val actions = buildList {
+            when (search.ctx) {
+                FileContext.LOCAL -> {
+                    add(SelectionAction(Icons.Outlined.Upload, "上传", enabled = vm.hasRemoteTarget()) {
+                        showMore = false
+                        vm.startTransfer(TransferMode.UPLOAD, chosen, FileContext.LOCAL)
+                    })
+                    add(SelectionAction(Icons.Outlined.Share, "分享", enabled = chosen.any { !it.isFolder }) {
+                        showMore = false
+                        vm.shareFiles(chosen)
+                    })
+                    add(SelectionAction(Icons.Outlined.StarBorder, "收藏") {
+                        showMore = false
+                        vm.favoriteEntries(chosen, fromSearch = true)
+                    })
+                }
+                FileContext.SYNO -> {
+                    add(SelectionAction(Icons.Outlined.Download, "下载") {
+                        showMore = false
+                        vm.startTransfer(TransferMode.DOWNLOAD, chosen, FileContext.SYNO)
+                    })
+                    add(SelectionAction(Icons.Outlined.StarBorder, "收藏") {
+                        showMore = false
+                        vm.favoriteEntries(chosen, fromSearch = true)
+                    })
+                }
+                // 网络位置的搜索结果横跨多个连接，下载要先知道具体连哪个，
+                // 这里不提供（否则只会得到一句「下载失败」）；删除走 deleteSearchEntries 自己判连接。
+                FileContext.NET -> Unit
+            }
+            add(SelectionAction(Icons.Outlined.Info, "查看详情", enabled = chosen.size == 1) {
+                showMore = false
+                chosen.singleOrNull()?.let(vm::showDetail)
+            })
+        }
+        SelectionMoreSheet(actions = actions, onDismiss = { showMore = false })
     }
 
     if (folderDialog) {
@@ -275,34 +422,14 @@ fun SearchScreen(state: MyFileBoxState, vm: AppViewModel) {
                         pickerStack.forEach { add(it to it.label) }
                         current?.let { add(it to it.label) }
                     }
-                    Row(
-                        Modifier.fillMaxWidth().padding(bottom = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        crumbs.forEachIndexed { index, (dest, label) ->
-                            val isLast = index == crumbs.lastIndex
-                            Text(
-                                label,
-                                fontSize = 12.sp,
-                                fontWeight = if (isLast) FontWeight.SemiBold else FontWeight.Normal,
-                                color = if (isLast) MaterialTheme.colorScheme.primary else MutedText,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(6.dp))
-                                    .clickable {
-                                        if (!isLast) {
-                                            pickerStack = if (index == 0) emptyList() else pickerStack.take(index - 1)
-                                            pickerCurrent = dest
-                                        }
-                                    }
-                                    .padding(horizontal = 3.dp, vertical = 2.dp)
-                            )
-                            if (!isLast) {
-                                Icon(Icons.Outlined.ChevronRight, null, tint = MutedText, modifier = Modifier.size(13.dp))
-                            }
+                    PathBreadcrumbs(
+                        labels = crumbs.map { it.second },
+                        modifier = Modifier.padding(bottom = 6.dp),
+                        onCrumbClick = { index ->
+                            pickerStack = if (index == 0) emptyList() else pickerStack.take(index - 1)
+                            pickerCurrent = crumbs[index].first
                         }
-                    }
+                    )
                     Column(Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState())) {
                         if (current == null) {
                             // 「所有位置」只在第一层出现；本地端不再单列「内部存储」，
@@ -431,11 +558,5 @@ fun SearchScreen(state: MyFileBoxState, vm: AppViewModel) {
     }
 }
 
-private fun friendlyFolder(name: String): String {
-    val trimmed = name.trim()
-    return when {
-        trimmed.isEmpty() || trimmed == "0" -> "内部存储"
-        trimmed.startsWith("/") -> trimmed.trimEnd('/').substringAfterLast('/').ifBlank { "内部存储" }
-        else -> name
-    }
-}
+private fun friendlyFolder(name: String, localRoot: String): String =
+    displayLeaf(name, localRoot, "内部存储")

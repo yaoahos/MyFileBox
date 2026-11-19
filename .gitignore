@@ -25,6 +25,9 @@ keystore.properties
 *.log
 *.part
 *.tmp
+*.bak
+*.orig
+*.rej
 __pycache__/
 *.pyc
 
@@ -32,8 +35,13 @@ __pycache__/
 tools/
 docs/screenshots/
 
+# ---- 更新日志规范（本地写作参考，不随版本发布） ----
+/changelog-spec.md
+
 # ---- 工具与 IDE ----
 .idea/
 *.iml
+.navigation/
+captures/
 .DS_Store
 Thumbs.db

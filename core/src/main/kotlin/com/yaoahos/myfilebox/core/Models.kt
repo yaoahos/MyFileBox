@@ -85,6 +85,8 @@ data class AppPrefs(
     val showNet: Boolean = true,
     val tabOrder: List<TabKey> = listOf(TabKey.LOCAL, TabKey.SYNO, TabKey.NET),
     val downloadFolder: String = "",
+    /** 下载文件夹时同时传输的文件数，1~6；数值越大越快，但对 NAS / 弱网压力也越大。 */
+    val downloadConcurrency: Int = 3,
     val theme: ThemePrefs = ThemePrefs(),
     val moduleOrder: List<String> = listOf(
         "local:categories", "local:folders",
@@ -119,6 +121,23 @@ data class AppPrefs(
      */
     val openDefaults: Map<String, String> = emptyMap()
 )
+
+/**
+ * 有效启动页：用户设置的默认页若仍可见就用它，否则退到第一个可见页，
+ * 再退到本地文件。冷启动、导入配置、返回到首页三条路径必须共用这一口径，
+ * 否则会出现「从群晖一路返回却落到本地文件」这类与默认启动页不符的行为。
+ */
+fun effectiveDefaultTab(prefs: AppPrefs): TabKey {
+    val visible = prefs.tabOrder.filter {
+        when (it) {
+            TabKey.LOCAL -> prefs.showLocal
+            TabKey.SYNO -> prefs.showSyno
+            TabKey.NET -> prefs.showNet
+        }
+    }
+    return if (prefs.defaultTab in visible) prefs.defaultTab
+    else visible.firstOrNull() ?: TabKey.LOCAL
+}
 
 data class RecycleItem(
     val id: String,

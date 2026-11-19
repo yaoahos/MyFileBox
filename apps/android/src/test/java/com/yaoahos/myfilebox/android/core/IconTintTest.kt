@@ -2,6 +2,8 @@ package com.yaoahos.myfilebox.android.core
 
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
+import com.yaoahos.myfilebox.android.data.AppIconSwitcher
+import com.yaoahos.myfilebox.android.data.aliasPaletteChanged
 import com.yaoahos.myfilebox.android.data.shouldMarkAliasApplied
 import com.yaoahos.myfilebox.android.ui.theme.MIN_WALLPAPER_SDK
 import com.yaoahos.myfilebox.android.ui.theme.isSystemWallpaperChange
@@ -57,19 +59,33 @@ class IconTintTest {
     }
 
     @Test
-    fun `柔化保留主题色的色相`() {
+    fun `主色口径染色保留主题色的色相`() {
         val brandBlue = 0xFF1F6BFF.toInt()
         val purple = 0xFFA855F7.toInt()
         val orange = 0xFFF97316.toInt()
         listOf(brandBlue, purple, orange).forEach { source ->
-            val softened = IconTint.soft(source)
-            val delta = kotlin.math.abs(hueOf(softened) - hueOf(source))
+            val toned = IconTint.themeTone(source)
+            val delta = kotlin.math.abs(hueOf(toned) - hueOf(source))
             assertTrue("色相不应明显偏移：$source", min(delta, 360f - delta) < 12f)
         }
     }
 
     @Test
-    fun `高饱和亮色收敛成明快但不刺眼的底色`() {
+    fun `桌面档位色与界面主色同算法同色系`() {
+        // 回归：桌面图标曾走 soft()（亮色口径），界面主色走 seedToPrimary
+        // （深饱和口径），同一个绿主题界面深绿、图标亮绿，看着不是一个色系。
+        // 两者现在必须共用 themeTone，结果逐位相等。
+        listOf(0xFF1F6B00, 0xFF1F6BFF, 0xFFA855F7, 0xFF22C55E, 0xFF64748B).forEach { argb ->
+            assertEquals(
+                "桌面色与主色算法漂移：#%06X".format(argb and 0xFFFFFF),
+                seedToPrimary(Color(argb.toInt()), false).toArgb(),
+                IconTint.themeTone(argb.toInt())
+            )
+        }
+    }
+
+    @Test
+    fun `高饱和亮色收敛成清晰但不刺眼的底色`() {
         val loud = listOf(
             0xFFFFFF00.toInt(), // 亮黄
             0xFFD946EF.toInt(), // 品红
@@ -77,46 +93,58 @@ class IconTintTest {
             0xFF1F6BFF.toInt()  // 品牌蓝
         )
         loud.forEach { source ->
-            val softened = IconTint.soft(source)
+            val toned = IconTint.themeTone(source)
             assertTrue(
-                "饱和度过高：#%06X -> #%06X".format(source and 0xFFFFFF, softened and 0xFFFFFF),
-                saturationOf(softened) <= 0.70f
+                "饱和度过高：#%06X -> #%06X".format(source and 0xFFFFFF, toned and 0xFFFFFF),
+                saturationOf(toned) <= 0.70f
             )
             assertTrue(
                 "明度超出可用带：#%06X".format(source and 0xFFFFFF),
-                lightnessOf(softened) in 0.30f..0.62f
+                lightnessOf(toned) in 0.10f..0.72f
             )
             assertTrue(
-                "白色文件夹对比不足：#%06X".format(softened and 0xFFFFFF),
-                contrastWithWhite(softened) >= 3.2
+                "白色文件夹对比不足：#%06X".format(toned and 0xFFFFFF),
+                contrastWithWhite(toned) >= 4.4
             )
         }
     }
 
     @Test
-    fun `底色明快且白色文件夹仍清晰`() {
+    fun `底色与白色文件夹保持足够对比`() {
         IconTint.buckets.forEach { color ->
             val contrast = contrastWithWhite(color)
-            // 上限防止调回旧版暗调：旧蓝/紫档分别达到 6.46 / 6.92，比原始
-            // 图标底色 #1B6FD2（4.94）还暗，用户反馈「深沉暗淡」。
-            assertTrue(
-                "底色过暗：#%06X 与白色对比 %.2f".format(color and 0xFFFFFF, contrast),
-                contrast <= 4.6
-            )
+            // 与界面主色同源后按「对白 4.5:1 起步」收敛：起点已达到的深色相
+            // （红/蓝/紫）会停在更深的位置，对比可到 10:1，但白文件夹只会更清晰。
+            // 关键是下限：浅色档也不能低于 4.4，否则白文件夹会被吃掉。
             assertTrue(
                 "底色与白色对比不足：#%06X 对比 %.2f".format(color and 0xFFFFFF, contrast),
-                contrast >= 3.0
+                contrast >= 4.4
             )
         }
     }
 
     @Test
-    fun `色相按 45 度分档`() {
-        assertEquals(0, IconTint.bucket(0xFFFF0000.toInt()))   // 红
-        assertEquals(3, IconTint.bucket(0xFF00FF00.toInt()))   // 绿 120°
-        assertEquals(5, IconTint.bucket(0xFF0000FF.toInt()))   // 蓝 240°
-        assertEquals(7, IconTint.bucket(0xFF800080.toInt()))   // 紫 300°
-        assertEquals(5, IconTint.bucket(0xFF1F6BFF.toInt()))   // 品牌蓝
+    fun `色相按 22 点 5 度分档`() {
+        assertEquals(0, IconTint.bucket(0xFFFF0000.toInt()))    // 红
+        assertEquals(5, IconTint.bucket(0xFF00FF00.toInt()))    // 绿 120°
+        assertEquals(11, IconTint.bucket(0xFF0000FF.toInt()))   // 蓝 240°
+        assertEquals(13, IconTint.bucket(0xFF800080.toInt()))   // 紫 300°
+        assertEquals(10, IconTint.bucket(0xFF1F6BFF.toInt()))   // 品牌蓝 219.6°
+    }
+
+    @Test
+    fun `任意色相与所选色档的色相误差不超过半个档宽`() {
+        // 8 档时最大误差 22.5°，交界处图标颜色会明显偏离界面主色。
+        val step = 360f / (IconTint.BUCKET_COUNT - 1)
+        (0..359).forEach { hue ->
+            val source = IconTint.hslToRgb(hue.toFloat(), 0.8f, 0.5f)
+            val center = IconTint.bucket(source) * step
+            val delta = kotlin.math.abs(hueOf(source) - center)
+            assertTrue(
+                "色相 $hue° 落到 $center°，偏差 ${min(delta, 360f - delta)}°",
+                min(delta, 360f - delta) <= step / 2f + 0.01f
+            )
+        }
     }
 
     @Test
@@ -132,16 +160,18 @@ class IconTintTest {
     }
 
     @Test
-    fun `桌面色档与柔化算法一致且索引在范围内`() {
+    fun `桌面色档与主题色算法一致且索引在范围内`() {
         assertEquals(IconTint.BUCKET_COUNT, IconTint.buckets.size)
-        repeat(8) { index ->
+        repeat(IconTint.BUCKET_COUNT - 1) { index ->
             val color = IconTint.buckets[index]
-            val expected = IconTint.soft(IconTint.hslToRgb(index * 45f, 1f, 0.5f))
-            assertEquals("第 $index 档应与 soft() 一致", expected, color)
+            val expected = IconTint.themeTone(
+                IconTint.hslToRgb(index * (360f / (IconTint.BUCKET_COUNT - 1)), 1f, 0.5f)
+            )
+            assertEquals("第 $index 档应与 themeTone() 一致", expected, color)
             assertTrue("色档索引越界", index in 0 until IconTint.BUCKET_COUNT)
         }
         assertEquals(
-            IconTint.soft(0xFF64748B.toInt()),
+            IconTint.themeTone(0xFF64748B.toInt()),
             IconTint.buckets[IconTint.NEUTRAL_BUCKET]
         )
     }
@@ -208,7 +238,17 @@ class IconTintTest {
     }
 
     @Test
-    fun `桌面资源色值与柔化算法一致`() {
+    fun `色档改版后旧的应用记忆必须失效`() {
+        assertTrue("1 是 9 档旧版", aliasPaletteChanged(1))
+        assertTrue("2 是 soft 亮色档，桌面缓存旧位图", aliasPaletteChanged(2))
+        assertTrue("3 是 V2 绿档，仍被桌面缓存", aliasPaletteChanged(3))
+        assertTrue("4 是 V3 纯白前景，图形已变", aliasPaletteChanged(4))
+        assertFalse("当前 V4 版本不用每次重切", aliasPaletteChanged(5))
+        assertTrue("未来改版也要重切", aliasPaletteChanged(6))
+    }
+
+    @Test
+    fun `桌面资源色值与主题色算法一致`() {
         val cwd = System.getProperty("user.dir")
         val file = listOf(
             File("src/main/res/values/colors.xml"),
@@ -220,6 +260,43 @@ class IconTintTest {
             assertTrue(
                 "第 $index 档资源应为 $expected（${file.absolutePath}）",
                 text.contains("<color name=\"icon_tint_$index\">$expected</color>")
+            )
+        }
+    }
+
+    @Test
+    fun `绿色主题切到第四版色档而不是旧蓝色档`() {
+        val primary = 0xFF1F6B00.toInt()
+        assertEquals(5, IconTint.bucket(primary))
+        assertEquals(
+            "com.yaoahos.myfilebox.android.IconTint5V4",
+            AppIconSwitcher.aliasFor(true, primary)
+        )
+        assertEquals(
+            "com.yaoahos.myfilebox.android.IconOriginal",
+            AppIconSwitcher.aliasFor(false, primary)
+        )
+    }
+
+    @Test
+    fun `第四版色档在清单和资源目录中齐全`() {
+        val manifest = listOf(
+            File("src/main/AndroidManifest.xml"),
+            File("apps/android/src/main/AndroidManifest.xml")
+        ).firstOrNull { it.isFile } ?: error("找不到 AndroidManifest.xml")
+        val mipmapDir = listOf(
+            File("src/main/res/mipmap-anydpi-v26"),
+            File("apps/android/src/main/res/mipmap-anydpi-v26")
+        ).firstOrNull { it.isDirectory } ?: error("找不到 mipmap-anydpi-v26")
+        val text = manifest.readText()
+        repeat(IconTint.BUCKET_COUNT) { index ->
+            assertTrue(
+                "清单缺少第 $index 档第四版 alias",
+                text.contains("android:name=\".IconTint${index}V4\"")
+            )
+            assertTrue(
+                "缺少第 $index 档第四版图标资源",
+                File(mipmapDir, "ic_launcher_tint_${index}_v4.xml").isFile
             )
         }
     }

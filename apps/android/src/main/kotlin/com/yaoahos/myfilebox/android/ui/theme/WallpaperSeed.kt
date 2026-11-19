@@ -11,7 +11,6 @@ import com.yaoahos.myfilebox.core.IconTint
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlin.math.abs
-import kotlin.math.pow
 
 private const val TAG = "MFB-THEME"
 
@@ -49,6 +48,9 @@ internal object WallpaperColorBus {
     val seed: StateFlow<Color?> = _seed
 
     /** 优先用回调带来的颜色：部分 ROM 触发回调时 getWallpaperColors 缓存还没刷新。 */
+    // primaryColor 是 API 27，lint 按 minSdk 26 报警；实际这个类只被
+    // wallpaperColorSupported()（31）之后的 OnColorsChangedListener 调用，走不到 26。
+    @Suppress("NewApi")
     fun publish(context: Context, colors: WallpaperColors?) {
         val argb = colors?.let { runCatching { it.primaryColor.toArgb() }.getOrNull() }
         val next = if (argb != null) Color(argb) else wallpaperSeedColor(context)
@@ -83,17 +85,59 @@ internal fun wallpaperSeedColor(context: Context): Color? {
             .getWallpaperColors(WallpaperManager.FLAG_SYSTEM)
         if (colors == null) {
             Log.d(TAG, "壁纸色缓存为空，回落系统方案")
-            null
-        } else {
-            val argb = colors.primaryColor.toArgb()
-            Log.d(TAG, "壁纸种子色 #%06X".format(argb and 0xFFFFFF))
-            Color(argb)
+            return null
         }
+        // 只取 primaryColor 会踩坑：部分 ROM（实测 HyperOS / Android 17 组合）
+        // 三个候选里只有 secondary / tertiary 是真实色，primary 直接给 #000000，
+        // 黑色进 HSL 后饱和度恒为 0，整屏就被推成灰的——正是「深蓝壁纸却是灰界面」。
+        // 这里把三个候选都拿出来，按可用性过滤后取最鲜艳的一个。
+        val candidates = listOf(
+            "primary" to colors.primaryColor,
+            "secondary" to colors.secondaryColor,
+            "tertiary" to colors.tertiaryColor
+        ).mapNotNull { (tag, color) ->
+            runCatching { color?.toArgb() }.getOrNull()?.let { tag to it }
+        }
+        val usable = candidates.filter { (_, argb) -> isUsableSeed(argb) }
+        if (usable.isEmpty()) {
+            Log.d(
+                TAG,
+                "壁纸候选色都不可用（${
+                    candidates.joinToString { "%s=#%06X".format(it.first, it.second and 0xFFFFFF) }
+                }），回落系统方案"
+            )
+            return null
+        }
+        val best = usable.maxByOrNull { (_, argb) -> seedScore(argb) }!!
+        Log.d(TAG, "壁纸种子色 #%06X（来自 %s）".format(best.second and 0xFFFFFF, best.first))
+        Color(best.second)
     } catch (t: Throwable) {
         Log.w(TAG, "读取壁纸色失败：${t.javaClass.simpleName}: ${t.message}")
         null
     }
 }
+
+/** 纯黑、透明、近灰都不适合当种子：喂进 HSL 后饱和度接近 0，界面会整片发灰。 */
+internal fun isUsableSeed(argb: Int): Boolean {
+    val alpha = argb ushr 24 and 0xFF
+    if (alpha < 0x10) return false
+    val r = argb shr 16 and 0xFF
+    val g = argb shr 8 and 0xFF
+    val b = argb and 0xFF
+    // 纯黑 / 近黑（各通道都极暗）没有可用色相
+    if (maxOf(r, g, b) < 24) return false
+    val (_, saturation, _) = hslOf(argb)
+    return saturation >= MIN_SEED_SATURATION
+}
+
+/** 候选排序：饱和度优先，亮度只做兜底参考，避免挑到几乎全黑的深色。 */
+internal fun seedScore(argb: Int): Float {
+    val (_, saturation, lightness) = hslOf(argb)
+    return saturation * 0.8f + (lightness * 0.4f).coerceAtMost(0.25f)
+}
+
+/** 低于这个饱和度视为「近灰」，不能作为动态配色的种子。 */
+private const val MIN_SEED_SATURATION = 0.12f
 
 /**
  * 把种子色规整成能当 primary 用的色调：色相不动，饱和度略收，明度压到与白字
@@ -107,25 +151,8 @@ internal fun wallpaperSeedColor(context: Context): Color? {
  * android.graphics.Color，在 JVM 单测里是恒返回 0 的桩方法，那样这条链路
  * （壁纸色 → 主色 → 桌面图标档位）就没法纳入回归。
  */
-internal fun seedToPrimary(seed: Color, dark: Boolean): Color {
-    val (hue, sourceSaturation, _) = hslOf(seed.toArgb())
-    // 近乎灰的壁纸不做强着色，否则会得到一片浑浊的蓝灰。
-    val saturation = if (sourceSaturation < 0.10f) {
-        sourceSaturation
-    } else {
-        (sourceSaturation * 0.92f).coerceIn(0.22f, 0.68f)
-    }
-    var lightness = if (dark) 0.70f else 0.42f
-    val step = if (dark) 0.025f else -0.025f
-    var candidate = IconTint.hslToRgb(hue, saturation, lightness)
-    val backdrop = if (dark) DarkBackground.toArgb() else Color.White.toArgb()
-    repeat(24) {
-        if (contrast(backdrop, candidate) >= 4.5) return Color(candidate)
-        lightness = (lightness + step).coerceIn(0.06f, 0.96f)
-        candidate = IconTint.hslToRgb(hue, saturation, lightness)
-    }
-    return Color(candidate)
-}
+internal fun seedToPrimary(seed: Color, dark: Boolean): Color =
+    Color(IconTint.themeTone(seed.toArgb(), dark))
 
 private fun hslOf(argb: Int): Triple<Float, Float, Float> {
     val r = (argb shr 16 and 0xFF) / 255f
@@ -145,19 +172,4 @@ private fun hslOf(argb: Int): Triple<Float, Float, Float> {
     var hue = raw * 60f
     if (hue < 0f) hue += 360f
     return Triple(hue, saturation, lightness)
-}
-
-private fun contrast(a: Int, b: Int): Double {
-    fun luminance(argb: Int): Double {
-        fun linear(v: Int): Double {
-            val c = v / 255.0
-            return if (c <= 0.04045) c / 12.92 else ((c + 0.055) / 1.055).pow(2.4)
-        }
-        return 0.2126 * linear(argb shr 16 and 0xFF) +
-            0.7152 * linear(argb shr 8 and 0xFF) +
-            0.0722 * linear(argb and 0xFF)
-    }
-    val la = luminance(a)
-    val lb = luminance(b)
-    return (maxOf(la, lb) + 0.05) / (minOf(la, lb) + 0.05)
 }

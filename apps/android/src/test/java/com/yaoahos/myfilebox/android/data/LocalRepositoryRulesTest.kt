@@ -140,7 +140,8 @@ class LocalRepositoryRulesTest {
         assertEquals("1.0 KB", LocalRepository.formatSize(1024L))
         assertEquals("1.5 KB", LocalRepository.formatSize(1536L))
         assertEquals("1.0 MB", LocalRepository.formatSize(1024L * 1024L))
-        assertEquals("1.00 GB", LocalRepository.formatSize(1024L * 1024L * 1024L))
+        // 与通知 / 回收站统一为一位小数，不再单独用两位
+        assertEquals("1.0 GB", LocalRepository.formatSize(1024L * 1024L * 1024L))
         // 小于 1 KB 保持字节整数
         assertTrue(LocalRepository.formatSize(2000L).endsWith("KB"))
     }

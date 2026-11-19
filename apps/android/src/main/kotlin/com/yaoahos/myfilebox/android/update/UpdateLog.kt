@@ -3,13 +3,13 @@ package com.yaoahos.myfilebox.android.update
 import android.content.Context
 
 /**
- * 内置更新日志。数据格式与 GitHub 发布说明一致，口径见
- * `docs/changelog-spec.md`：标题 `**YYYY/MM/DD · X.Y.Z**`，条目 `- 动词 描述`。
+ * 内置更新日志。数据格式与 GitHub 发布说明一致：
+ * 标题 `**YYYY/MM/DD · X.Y.Z**`，条目 `- 动词 描述`。
  *
  * ```
- * **2026/11/12 · 3.9.15**
- * - 修复 SMB 等网络协议连接失败
- * - 优化 打开方式对所有文件类型一致
+ * **YYYY/MM/DD · X.Y.Z**
+ * - 修复 示例问题
+ * - 优化 示例体验
  * ```
  */
 object UpdateLog {

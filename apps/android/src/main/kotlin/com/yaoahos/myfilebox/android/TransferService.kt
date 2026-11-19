@@ -15,16 +15,21 @@ import com.yaoahos.myfilebox.android.ui.TransferTask
  */
 class TransferService : Service() {
     companion object {
-        /** 停止前台服务但把通知留在通知栏（用于「完成」通知继续显示）。 */
-        const val ACTION_DETACH = "com.yaoahos.myfilebox.DETACH_FOREGROUND"
+        /**
+         * 停止前台服务并撤掉它那条进度通知。
+         *
+         * 不要「摘掉前台身份、把通知留在栏里」：前台服务名下的通知用户划不掉，
+         * 系统的「清除全部」也清不掉，只能变成一条赖着不走的旧进度。
+         * 完成结果由 TransferNotifications.notifyFinal() 单独发一条可清除的通知。
+         */
+        const val ACTION_STOP = "com.yaoahos.myfilebox.STOP_FOREGROUND"
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_DETACH) {
-            // 只把「前台」这个身份摘掉，通知本身留着，用户点它就能打开刚传完的文件。
-            ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_DETACH)
+        if (intent?.action == ACTION_STOP) {
+            ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
             stopSelf()
             return START_NOT_STICKY
         }

@@ -1,7 +1,10 @@
 package com.yaoahos.myfilebox.android.data
 
+import com.yaoahos.myfilebox.android.ui.isPresetAccent
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -75,5 +78,12 @@ class AccentColorTest {
     fun `解析与回填互逆`() {
         val parsed = parseAccentHex("#EC4899")
         assertEquals("#EC4899", accentToHex(parsed!!))
+    }
+
+    @Test
+    fun `动态取色回落时认得出预置色和自选色`() {
+        assertTrue(isPresetAccent(0xFF1F6BFFL))
+        assertTrue(isPresetAccent(0xFF475569L))
+        assertFalse(isPresetAccent(0xFFF97399L))
     }
 }
