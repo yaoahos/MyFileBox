@@ -450,7 +450,13 @@ fun SearchScreen(state: MyFileBoxState, vm: AppViewModel) {
                                 )
                             }
                         }
-                        val rows = if (current == null) vm.searchRootDestinations(search.ctx) else (children ?: emptyList())
+                        // 根目录候选要真去列一次 /sdcard：放在组合里会被每次重组（改选中项、
+                        // 滚动、主题变化）重复触发，等于反复读盘。按输入记住结果即可。
+                        val rows = if (current == null) {
+                            remember(search.ctx, state.localRoot, state.shares, state.connections) {
+                                vm.searchRootDestinations(search.ctx)
+                            }
+                        } else (children ?: emptyList())
                         if (children == null && current != null) {
                             Box(Modifier.fillMaxWidth().height(120.dp), contentAlignment = Alignment.Center) {
                                 CircularProgressIndicator(modifier = Modifier.size(22.dp), strokeWidth = 2.dp)

@@ -98,18 +98,24 @@ internal fun AppViewModel.openRecycle(ctx: FileContext = FileContext.LOCAL) {
                 recycleExtFilter = "",
                 recycleContext = FileContext.SYNO,
                 recycleItems = emptyList(),
-                loading = true
+                recycleLoading = true
             )
             viewModelScope.launch {
+                // 索引是本地 JSON 文件，读它和合并后的写回都不能留在 UI 线程。
                 val items = withContext(Dispatchers.IO) {
+                    val tracked = synoRecycleIndex.all()
                     session?.let {
-                        dsm.listRecycleBin(it, state.shares.map { s -> s.path }, tracked = synoRecycleIndex.all())
+                        dsm.listRecycleBin(it, state.shares.map { s -> s.path }, tracked = tracked)
                     }.orEmpty()
                 }
-                pruneSynoRecycleIndex(items)
-                state = state.copy(recycleItems = items, loading = false)
+                withContext(Dispatchers.IO) { pruneSynoRecycleIndex(items) }
+                if (state.recycleContext == FileContext.SYNO) {
+                    state = state.copy(recycleItems = items, recycleLoading = false)
+                }
             }
         } else {
+            // 同一次进入过的本地清单先顶上，避免多闪一帧空态；真列表在 IO 线程重读。
+            val cached = if (state.recycleContext == FileContext.LOCAL) state.recycleItems else emptyList()
             state = state.copy(
                 recycleOpen = true,
                 recycleSelected = emptySet(),
@@ -117,10 +123,26 @@ internal fun AppViewModel.openRecycle(ctx: FileContext = FileContext.LOCAL) {
                 recycleNameFilter = "",
                 recycleExtFilter = "",
                 recycleContext = FileContext.LOCAL,
-                recycleItems = runCatching { local.listRecycle() }.getOrDefault(emptyList())
+                recycleItems = cached,
+                recycleLoading = true
             )
+            viewModelScope.launch {
+                val items = withContext(Dispatchers.IO) { readLocalRecycle() }
+                if (state.recycleContext == FileContext.LOCAL) {
+                    state = state.copy(recycleItems = items, recycleLoading = false)
+                }
+            }
         }
     }
+
+
+/**
+ * 读本地回收站清单（每个条目要读一次 .meta 并做两次 stat）。
+ *
+ * 条目多时是几百毫秒的活，只能在 IO 线程调用：放在 UI 线程会让进入回收站明显卡一下。
+ */
+private fun AppViewModel.readLocalRecycle(): List<RecycleItem> =
+        runCatching { local.listRecycle() }.getOrDefault(emptyList())
 
 
 internal fun AppViewModel.closeRecycle() { state = state.copy(recycleOpen = false, recycleSelected = emptySet(), recycleSelecting = false) }
@@ -135,16 +157,27 @@ internal fun AppViewModel.refreshRecycle() {
             viewModelScope.launch {
                 state = state.copy(refreshing = true)
                 val items = withContext(Dispatchers.IO) {
-                    session.let {
-                        dsm.listRecycleBin(it, state.shares.map { s -> s.path }, tracked = synoRecycleIndex.all())
-                    }
+                    val tracked = synoRecycleIndex.all()
+                    dsm.listRecycleBin(session, state.shares.map { s -> s.path }, tracked = tracked)
                 }
-                pruneSynoRecycleIndex(items)
-                state = state.copy(recycleItems = items, refreshing = false)
+                withContext(Dispatchers.IO) { pruneSynoRecycleIndex(items) }
+                if (state.recycleContext == FileContext.SYNO) {
+                    state = state.copy(recycleItems = items, refreshing = false)
+                } else {
+                    state = state.copy(refreshing = false)
+                }
             }
         } else {
-            val items = runCatching { local.listRecycle() }.getOrDefault(emptyList())
-            state = state.copy(recycleItems = items, refreshing = false)
+            // 本地同样不能在 UI 线程读清单：条目上千时读盘就是一次明显掉帧。
+            viewModelScope.launch {
+                state = state.copy(refreshing = true)
+                val items = withContext(Dispatchers.IO) { readLocalRecycle() }
+                state = if (state.recycleContext == FileContext.LOCAL) {
+                    state.copy(recycleItems = items, refreshing = false)
+                } else {
+                    state.copy(refreshing = false)
+                }
+            }
         }
     }
 
@@ -163,7 +196,7 @@ internal fun AppViewModel.restoreRecycle(item: RecycleItem) {
                     if (state.recycleContext == FileContext.SYNO) dsm.lastError ?: "恢复失败" else "恢复失败"
             )
             if (state.recycleContext == FileContext.SYNO) {
-                if (ok) synoRecycleIndex.remove(listOf(item.trashPath))
+                if (ok) withContext(Dispatchers.IO) { synoRecycleIndex.remove(listOf(item.trashPath)) }
                 val items = withContext(Dispatchers.IO) { freshSynoRecycleItems() }
                 state = state.copy(recycleItems = items)
                 // 群晖恢复后要让原目录重新拉一次列表，否则回到原位置还是旧内容。
@@ -173,9 +206,9 @@ internal fun AppViewModel.restoreRecycle(item: RecycleItem) {
                     return@launch
                 }
             } else {
-                state = state.copy(
-                    recycleItems = runCatching { local.listRecycle() }.getOrDefault(emptyList())
-                )
+                // 还原后重读清单同样走 IO：这一步和进入页面时的读盘是同一种开销。
+                val items = withContext(Dispatchers.IO) { readLocalRecycle() }
+                state = state.copy(recycleItems = items)
                 if (ok) {
                     // 立即把还原项增量插回缓存：全盘扫描要几秒到几十秒，
                     // 只靠 refreshLocal 会让用户回到原位置时看不到刚恢复的文件。
@@ -317,7 +350,7 @@ internal fun AppViewModel.restoreRecycleMany(items: List<RecycleItem>) {
             }
             val restored = items.filter { it.id !in failedIds }
             if (state.recycleContext == FileContext.SYNO && restored.isNotEmpty()) {
-                synoRecycleIndex.remove(restored.map { it.trashPath })
+                withContext(Dispatchers.IO) { synoRecycleIndex.remove(restored.map { it.trashPath }) }
             }
             val fresh = withContext(Dispatchers.IO) {
                 when (state.recycleContext) {
@@ -379,7 +412,7 @@ internal fun AppViewModel.deleteRecycleItems(items: List<RecycleItem>) {
                 }
             }
             if (state.recycleContext == FileContext.SYNO && ok) {
-                synoRecycleIndex.remove(items.map { it.trashPath })
+                withContext(Dispatchers.IO) { synoRecycleIndex.remove(items.map { it.trashPath }) }
             }
             val fresh = withContext(Dispatchers.IO) {
                 when (state.recycleContext) {
@@ -413,7 +446,7 @@ internal fun AppViewModel.emptyRecycle() {
                     val ok = withContext(Dispatchers.IO) {
                         if (session != null && paths.isNotEmpty()) dsm.deleteRecycleItems(session, paths) else true
                     }
-                    if (ok) synoRecycleIndex.clear()
+                    if (ok) withContext(Dispatchers.IO) { synoRecycleIndex.clear() }
                     val fresh = withContext(Dispatchers.IO) {
                         session?.let {
                             dsm.listRecycleBin(it, state.shares.map { s -> s.path }, tracked = synoRecycleIndex.all())

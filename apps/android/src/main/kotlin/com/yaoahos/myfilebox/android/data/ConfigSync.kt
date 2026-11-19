@@ -43,8 +43,9 @@ enum class SyncInterval(val hours: Int, val label: String) {
 /**
  * 云端配置「一设备一份」的命名与身份。
  *
- * 文件名形如 `myfilebox-config-Xiaomi_14-3f9a.mfbx`：
- * 前半是本机可读名（默认「厂商 + 型号」，用户可改），后半是 4 位短码。
+ * 文件名形如 `myfilebox-config-Xiaomi_Pad_6S_Pro-3f9a.mfbx`：
+ * 前半是本机可读名（默认取系统「设备名称」，取不到用「厂商 + 型号」，用户可改），
+ * 后半是 4 位短码。
  *
  * **为什么要短码**：同型号两台设备（家里两台同款手机、公司配的同款平板）型号串
  * 完全一致，只靠型号名会互相覆盖——那正是「不同设备要独立」要避免的事。
@@ -66,7 +67,7 @@ object DeviceProfile {
         return generated
     }
 
-    /** 显示名：改过就用改过的，否则用厂商 + 型号。 */
+    /** 显示名：改过就用改过的，否则用设备型号，再不行用厂商 + 型号。 */
     fun name(prefs: SharedPreferences): String =
         prefs.getString(KEY_NAME, null)?.takeIf { it.isNotBlank() } ?: hardwareName()
 
@@ -74,13 +75,62 @@ object DeviceProfile {
         prefs.edit().putString(KEY_NAME, name.trim()).apply()
     }
 
-    fun hardwareName(): String {
-        val maker = runCatching { Build.MANUFACTURER }.getOrDefault("").trim()
-        val model = runCatching { Build.MODEL }.getOrDefault("").trim()
-        val joined = if (maker.isNotEmpty() && !model.lowercase().startsWith(maker.lowercase())) {
-            "$maker $model"
-        } else model
+    /**
+     * 本机默认名：优先读**只读的设备型号**（`ro.product.marketname` 等系统属性）。
+     * 小米等 ROM 的 `Build.MODEL` 填的是认证型号（24018RPACC 这类），直接展示没人认得；
+     * 属性都取不到时再回落「厂商 + 型号」。注意不能用 `Settings.Global` 的
+     * `device_name`：那是用户可改的「设备名称」（蓝牙名），不是型号。
+     */
+    fun hardwareName(): String = resolvedName(marketingModel(), Build.MANUFACTURER, Build.MODEL)
+
+    /** 拆成纯函数便于单测：设备型号 > 厂商+型号（型号已带厂商则不重复）> Android。 */
+    internal fun resolvedName(modelName: String?, manufacturer: String, model: String): String {
+        val fromProperty = modelName?.trim().orEmpty()
+        if (fromProperty.isNotEmpty()) return fromProperty
+        val maker = manufacturer.trim()
+        val rawModel = model.trim()
+        val joined = if (maker.isNotEmpty() && !rawModel.lowercase().startsWith(maker.lowercase())) {
+            "$maker $rawModel"
+        } else rawModel
         return joined.trim().ifBlank { "Android" }
+    }
+
+    /** 只读的营销型号属性，按优先级取第一个非空值。 */
+    private val MODEL_PROPS = listOf(
+        "ro.product.marketname",
+        "ro.product.odm.marketname",
+        "ro.product.vendor.marketname",
+        "ro.product.system.marketname"
+    )
+
+    /** 读一次就缓存：属性读取不便宜，设置页每次重组不该重复读。 */
+    @Volatile
+    private var cachedModel: String? = null
+
+    private fun marketingModel(): String? {
+        cachedModel?.let { return it.ifBlank { null } }
+        val value = MODEL_PROPS.firstNotNullOfOrNull { key ->
+            systemProperty(key)?.trim()?.takeIf { it.isNotEmpty() }
+        }
+        cachedModel = value ?: ""
+        return value
+    }
+
+    /**
+     * 读系统属性：先反射 `android.os.SystemProperties.get`（快），被隐藏 API 限制
+     * 拦下时退回 `getprop` 命令（不需要权限）。两者都失败返回 null。
+     */
+    private fun systemProperty(key: String): String? {
+        runCatching {
+            val get = Class.forName("android.os.SystemProperties")
+                .getMethod("get", String::class.java)
+            (get.invoke(null, key) as? String)?.takeIf { it.isNotBlank() }?.let { return it }
+        }
+        return runCatching {
+            val process = Runtime.getRuntime().exec(arrayOf("getprop", key))
+            process.inputStream.bufferedReader().use { it.readText() }
+                .trim().takeIf { it.isNotEmpty() }
+        }.getOrNull()
     }
 
     /** 文件名里只留字母、数字、中文、下划线与连字符，避免 WebDAV 端拼路径出岔。 */
@@ -150,7 +200,7 @@ data class SyncSettings(
     val hasCipher: Boolean = false,
     val lastSyncAt: Long = 0L,
     val lastResult: String = "",
-    /** 本机在云端的配置名（可改）；为空时用「厂商 + 型号」。 */
+    /** 本机在云端的配置名（可改）；为空时优先系统「设备名称」，再回落「厂商 + 型号」。 */
     val deviceName: String = ""
 ) {
     val interval: SyncInterval get() = SyncInterval.ofHours(autoHours)

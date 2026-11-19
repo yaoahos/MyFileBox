@@ -47,4 +47,27 @@ class DeviceProfileNamingTest {
         assertEquals("1a2b", a?.second)
         assertEquals("9z0y", b?.second)
     }
+
+    @Test
+    fun `marketing model wins over certification model`() {
+        // 小米等 ROM 的 Build.MODEL 是认证型号（24018RPACC / 2410DPN6CC），
+        // 只读的设备型号在 ro.product.marketname，默认名必须优先用它。
+        assertEquals(
+            "Xiaomi Pad 6S Pro 12.4",
+            DeviceProfile.resolvedName("Xiaomi Pad 6S Pro 12.4", "Xiaomi", "24018RPACC")
+        )
+        assertEquals(
+            "Xiaomi 15 Pro",
+            DeviceProfile.resolvedName("  Xiaomi 15 Pro  ", "Xiaomi", "2410DPN6CC")
+        )
+    }
+
+    @Test
+    fun `falls back to manufacturer and model without marketing model`() {
+        assertEquals("Xiaomi 2410DPN6CC", DeviceProfile.resolvedName(null, "Xiaomi", "2410DPN6CC"))
+        assertEquals("Xiaomi 2410DPN6CC", DeviceProfile.resolvedName("   ", "Xiaomi", "2410DPN6CC"))
+        // 型号已带厂商前缀时不重复厂商。
+        assertEquals("Xiaomi 14", DeviceProfile.resolvedName(null, "Xiaomi", "Xiaomi 14"))
+        assertEquals("Android", DeviceProfile.resolvedName(null, "", ""))
+    }
 }

@@ -692,18 +692,25 @@ internal fun AppViewModel.markTransferMissing(taskId: String) {
 
     /** 检测已下载文件是否被外部删除，更新记录状态为 MISSING。 */
 internal fun AppViewModel.detectMissingFiles() {
-        var changed = false
-        val updated = transfers.map { task ->
-            if (task.status == TransferStatus.SUCCESS && task.mode == TransferMode.DOWNLOAD && task.target.isNotBlank()) {
-                val exists = File(task.target).exists()
-                if (!exists && task.status != TransferStatus.MISSING) {
-                    changed = true
+        // 每条成功的下载记录都要 stat 一次目标文件（模拟存储上每次数毫秒）。记录一多，
+        // 这一步放在 UI 线程就会让「进传输中心」卡一下——与回收站读清单是同一类问题，
+        // 因此只取快照，判断放到 IO，回来再改状态。
+        val candidates = transfers.filter {
+            it.status == TransferStatus.SUCCESS &&
+                it.mode == TransferMode.DOWNLOAD &&
+                it.target.isNotBlank()
+        }
+        if (candidates.isEmpty()) return
+        viewModelScope.launch {
+            val missing = withContext(Dispatchers.IO) {
+                candidates.filter { !File(it.target).exists() }.map { it.id }.toSet()
+            }
+            if (missing.isEmpty()) return@launch
+            transfers = transfers.map { task ->
+                if (task.id in missing && task.status == TransferStatus.SUCCESS) {
                     task.copy(status = TransferStatus.MISSING, error = "文件已丢失或被删除")
                 } else task
-            } else task
-        }
-        if (changed) {
-            transfers = updated
+            }
             persistTransfers()
         }
     }

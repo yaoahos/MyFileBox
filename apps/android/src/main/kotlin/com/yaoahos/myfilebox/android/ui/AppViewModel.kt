@@ -367,6 +367,14 @@ data class MyFileBoxState(
      */
     val recycleNameFilter: String = "",
     val recycleExtFilter: String = "",
+    /**
+     * 回收站列表是否正在读盘 / 拉取。
+     *
+     * 不能复用通用 `loading`：那个字段是浏览页的加载态，回收站读写它会让两页互相干扰。
+     * 本地条目多时 `listRecycle()` 要几百毫秒（实测 1635 项 ≈ 250ms），必须离开 UI 线程，
+     * 加载期间用这个标记显示「正在加载回收站」，而不是先闪一次「回收站是空的」。
+     */
+    val recycleLoading: Boolean = false,
     /** 回收站归属（清单 5）：本地回收只管本地，群晖回收走 #recycle。 */
     val recycleContext: FileContext = FileContext.LOCAL,
     /** 群晖共享管理（清单 4）：统一查看 / 取消共享链接。 */
@@ -612,7 +620,15 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     init {
         val prefs = loadPrefs()
         val initialTab = effectiveDefaultTab(prefs)
-        transfers = loadTransfers()
+        // 传输记录可能含上千个子项（整份 JSON 到 MB 级），解析放后台：首帧用不到它，
+        // 传输中心打开时再读也已经就绪，不会出现「先空一下再冒出来」。
+        // 若解析回来前用户已经新建了任务（transfers 非空），保留新列表，别覆盖。
+        viewModelScope.launch {
+            val loaded = withContext(Dispatchers.IO) {
+                runCatching { loadTransfers() }.getOrDefault(emptyList())
+            }
+            if (transfers.isEmpty()) transfers = loaded
+        }
         state = state.copy(
             prefs = prefs,
             session = loadSession(),

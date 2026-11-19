@@ -26,11 +26,22 @@ object GitHubUpdater {
     /** GitHub 下载地址通常跳到 objects.githubusercontent.com，逐跳校验，最多允许 5 跳。 */
     private const val MAX_REDIRECTS = 5
 
-    /** 只允许从 GitHub 的域名取安装包。 */
-    private val ALLOWED_HOSTS = listOf(
-        "github.com", "api.github.com",
-        "objects.githubusercontent.com", "github-releases.githubusercontent.com"
-    )
+    /**
+     * 只允许从 GitHub 的域名取安装包。
+     *
+     * 下载会跳两次：`github.com/.../releases/download/...` 先 302 到
+     * `release-assets.githubusercontent.com`（资产实际所在的 CDN），
+     * 早期还会落在 `objects.githubusercontent.com` / `github-releases.githubusercontent.com`。
+     * 这些主机名由 GitHub 分配、会随其 CDN 调整而变，逐个写死会在改版后整条下载链路失效，
+     * 因此对 `*.githubusercontent.com` 统一按后缀放行。
+     */
+    private val ALLOWED_HOSTS = listOf("github.com", "api.github.com")
+
+    /** GitHub 的 CDN 域：`.githubusercontent.com` 必须带前导点，避免 evilgithubusercontent.com 混入。 */
+    private const val CDN_HOST_SUFFIX = ".githubusercontent.com"
+
+    /** 跳到了 GitHub 之外的域名，多半是被劫持；提示要走得通的手动路径。 */
+    private const val BLOCKED_URL_MESSAGE = "下载地址不在 GitHub 域名内，请到发布页手动下载"
 
     /** 拉取最新版本（单条）。 */
     fun fetchLatest(attempts: Int = 3): UpdateInfo {
@@ -132,16 +143,33 @@ object GitHubUpdater {
             version = version,
             name = release.optString("name").ifBlank { "MyFileBox $version" },
             notes = release.optString("body").trim(),
-            date = release.optString("published_at").take(10).replace('-', '/')
+            date = localDate(release.optString("published_at"))
         )
+    }
+
+    /**
+     * `published_at` 是 UTC 的 ISO 时间（如 `2026-11-19T16:24:30Z`），
+     * 直接截前 10 位会显示成 UTC 的日期——东八区凌晨发布时比本地日期早一天，
+     * 与更新日志正文里写的日期对不上。按本机时区换算后再取日期。
+     */
+    internal fun localDate(iso: String): String {
+        if (iso.isBlank()) return ""
+        return runCatching {
+            java.time.Instant.parse(iso)
+                .atZone(java.time.ZoneId.systemDefault())
+                .toLocalDate()
+                .format(java.time.format.DateTimeFormatter.ofPattern("yyyy/MM/dd"))
+        }.getOrElse { iso.take(10).replace('-', '/') }
     }
 
     /** 内置更新日志里挑前几条，格式与发布说明一致。 */
     fun releaseNotes(notes: List<ReleaseNote>, limit: Int = 10): List<ReleaseNote> = notes.take(limit)
 
     /**
-     * 下载地址校验规则（纯函数，可单测）：必须 https 且主机名精确落在白名单内。
-     * 主机名按整串等值比较——github.com.evil.com 之类的后缀伪装过不了。
+     * 下载地址校验规则（纯函数，可单测）：必须 https，主机名要么精确等于
+     * `github.com` / `api.github.com`，要么落在 `*.githubusercontent.com` 下。
+     * 按整串比较（后缀必须带前导点）——github.com.evil.com、
+     * evil-githubusercontent.com 这类伪装过不了。
      */
     fun isAllowedDownloadUrl(url: String): Boolean {
         if (!url.startsWith("https://")) return false
@@ -149,7 +177,11 @@ object GitHubUpdater {
             .substringBefore('/')
             .substringBefore('?')
             .substringBefore('#')
-        return ALLOWED_HOSTS.any { host.equals(it, ignoreCase = true) }
+            .lowercase()
+        if (host.isEmpty()) return false
+        if (ALLOWED_HOSTS.any { host == it }) return true
+        // 必须比后缀长，`githubusercontent.com` 本身（无子域）不算。
+        return host.length > CDN_HOST_SUFFIX.length && host.endsWith(CDN_HOST_SUFFIX)
     }
 
     /** 把 Location 解析成绝对地址；相对跳转与协议相对跳转都按 URL 规则处理。 */
@@ -165,7 +197,7 @@ object GitHubUpdater {
         var active: HttpURLConnection? = null
         // 不能依赖 instanceFollowRedirects：那样只校验初始 URL，302 到任意域名都会放行。
         for (hop in 0 until MAX_REDIRECTS) {
-            if (!isAllowedDownloadUrl(current)) throw UpdateDownloadException("安装包地址无效")
+            if (!isAllowedDownloadUrl(current)) throw UpdateDownloadException(BLOCKED_URL_MESSAGE)
             val connection = (URL(current).openConnection() as HttpURLConnection).apply {
                 connectTimeout = 20_000
                 readTimeout = 60_000
@@ -173,7 +205,13 @@ object GitHubUpdater {
                 setRequestProperty("User-Agent", USER_AGENT)
                 setRequestProperty("Accept", "application/octet-stream")
             }
-            val code = connection.responseCode
+            // 取响应码本身就可能抛（超时、连接被重置），这条路径同样要断开，否则连接泄漏。
+            val code = try {
+                connection.responseCode
+            } catch (e: Exception) {
+                connection.disconnect()
+                throw e
+            }
             if (code in 300..399) {
                 val location = connection.getHeaderField("Location")
                 connection.disconnect()

@@ -222,7 +222,7 @@ fun RecycleScreen(state: MyFileBoxState, vm: AppViewModel) {
             header()
             Box(Modifier.fillMaxWidth().weight(1f)) {
             when {
-                sortedItems.isEmpty() && state.loading -> {
+                sortedItems.isEmpty() && state.recycleLoading -> {
                     // 清单 8（3.2.0）：群晖回收站加载时不再先闪「空」状态。
                     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                             Column(horizontalAlignment = Alignment.CenterHorizontally) {

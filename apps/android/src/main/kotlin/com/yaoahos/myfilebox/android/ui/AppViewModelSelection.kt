@@ -1061,35 +1061,45 @@ internal fun AppViewModel.shareFile(file: FileEntry) { shareFiles(listOf(file)) 
 
 
 internal fun AppViewModel.shareFiles(files: List<FileEntry>) {
-        val localFiles = files.filter { it.path.startsWith("/") && File(it.path).exists() }
-        if (localFiles.isEmpty()) {
+        // 全是远程文件时立刻给提示，不必进协程。
+        if (files.none { it.path.startsWith("/") }) {
             state = state.copy(message = "远程文件请先下载后再分享")
             return
         }
-        val context = getApplication<Application>()
-        runCatching {
-            val uris = ArrayList<Uri>()
-            localFiles.forEach { file ->
-                uris.add(FileProvider.getUriForFile(context, "${context.packageName}.files", File(file.path)))
+        // 判断文件还在不在要对每个条目 stat 一次；多选几十上百个时这一步不能占着 UI 线程。
+        viewModelScope.launch {
+            val localFiles = withContext(Dispatchers.IO) {
+                files.filter { it.path.startsWith("/") && File(it.path).exists() }
             }
-            val clip = ClipData.newRawUri("MyFileBox", uris.first())
-            uris.drop(1).forEach { clip.addItem(ClipData.Item(it)) }
-            val intent = if (uris.size == 1) {
-                Intent(Intent.ACTION_SEND).apply {
-                    type = localFiles.first().mime.ifBlank { "application/octet-stream" }
-                    putExtra(Intent.EXTRA_STREAM, uris.first())
-                }
-            } else {
-                Intent(Intent.ACTION_SEND_MULTIPLE).apply {
-                    type = "*/*"
-                    putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
-                }
+            if (localFiles.isEmpty()) {
+                state = state.copy(message = "远程文件请先下载后再分享")
+                return@launch
             }
-            intent.clipData = clip
-            intent.putExtra(Intent.EXTRA_SUBJECT, "来自 MyFileBox 的分享")
-            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            context.startActivity(Intent.createChooser(intent, "分享文件").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-        }.onFailure { state = state.copy(message = "无法调用系统分享") }
+            val context = getApplication<Application>()
+            runCatching {
+                val uris = ArrayList<Uri>()
+                localFiles.forEach { file ->
+                    uris.add(FileProvider.getUriForFile(context, "${context.packageName}.files", File(file.path)))
+                }
+                val clip = ClipData.newRawUri("MyFileBox", uris.first())
+                uris.drop(1).forEach { clip.addItem(ClipData.Item(it)) }
+                val intent = if (uris.size == 1) {
+                    Intent(Intent.ACTION_SEND).apply {
+                        type = localFiles.first().mime.ifBlank { "application/octet-stream" }
+                        putExtra(Intent.EXTRA_STREAM, uris.first())
+                    }
+                } else {
+                    Intent(Intent.ACTION_SEND_MULTIPLE).apply {
+                        type = "*/*"
+                        putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
+                    }
+                }
+                intent.clipData = clip
+                intent.putExtra(Intent.EXTRA_SUBJECT, "来自 MyFileBox 的分享")
+                intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                context.startActivity(Intent.createChooser(intent, "分享文件").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            }.onFailure { state = state.copy(message = "无法调用系统分享") }
+        }
     }
 
 

@@ -306,8 +306,17 @@ internal fun AppViewModel.persistTransfersThrottled() {
     }
 
 
-internal fun AppViewModel.persistTransfers() =
-        persistTransferSnapshot(transfers.filterNot { it.quiet }.take(30))
+/**
+ * 立即落盘传输记录（不做节流）。
+ *
+ * 与 [persistTransfersThrottled] 同一口径：快照在主线程取（读 Compose State 安全），
+ * 序列化 + 写盘放 IO。一个上千文件的文件夹任务整份 JSON 可达 MB 级，同步写会把主线程
+ * 按住几十到几百毫秒——暂停、清空历史、删除记录这些操作都会走到这里。
+ */
+internal fun AppViewModel.persistTransfers() {
+        val snapshot = transfers.filterNot { it.quiet }.take(30)
+        viewModelScope.launch(Dispatchers.IO) { persistTransferSnapshot(snapshot) }
+    }
 
 
 private fun AppViewModel.persistTransferSnapshot(snapshot: List<TransferTask>) {

@@ -4,6 +4,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.util.TimeZone
 
 /**
  * 更新模块纯规则单测：版本归一化、版本大小比较、下载地址白名单。
@@ -112,6 +113,28 @@ class GitHubUpdaterTest {
     }
 
     @Test
+    fun downloadUrl_allowsGithubCdnSubdomains() {
+        // GitHub 现在把 release 资产 302 到 release-assets.githubusercontent.com（实测），
+        // 早期是 objects. / github-releases.。主机名会随 CDN 调整变化，按后缀统一放行。
+        assertTrue(
+            GitHubUpdater.isAllowedDownloadUrl(
+                "https://release-assets.githubusercontent.com/github-production-release-asset/1/a.apk?jwt=x"
+            )
+        )
+        assertTrue(GitHubUpdater.isAllowedDownloadUrl("https://github-releases.githubusercontent.com/a.apk"))
+        assertTrue(GitHubUpdater.isAllowedDownloadUrl("https://raw.githubusercontent.com/a.apk"))
+    }
+
+    @Test
+    fun downloadUrl_rejectsCdnLookalikes() {
+        // 后缀必须带前导点：evil-githubusercontent.com 不是 GitHub 的子域。
+        assertFalse(GitHubUpdater.isAllowedDownloadUrl("https://evil-githubusercontent.com/a.apk"))
+        assertFalse(GitHubUpdater.isAllowedDownloadUrl("https://githubusercontent.com.evil.com/a.apk"))
+        // 裸域（没有子域）同样不放行。
+        assertFalse(GitHubUpdater.isAllowedDownloadUrl("https://githubusercontent.com/a.apk"))
+    }
+
+    @Test
     fun redirect_targetMustStillPassWhitelist() {
         // GitHub 的真实跳转目标是 objects.githubusercontent.com，必须继续放行。
         val allowed = GitHubUpdater.resolveRedirect(
@@ -137,5 +160,28 @@ class GitHubUpdaterTest {
         assertEquals(10, GitHubUpdater.releaseNotes(notes).size)
         assertEquals(3, GitHubUpdater.releaseNotes(notes, limit = 3).size)
         assertEquals(15, GitHubUpdater.releaseNotes(notes, limit = 99).size)
+    }
+
+    // ---- localDate：published_at 是 UTC，展示要用本机时区 ----
+
+    @Test
+    fun localDate_usesDeviceTimeZone() {
+        val original = TimeZone.getDefault()
+        val iso = "2026-11-19T16:24:30Z" // 北京时间 2026/11/20 00:24
+        try {
+            TimeZone.setDefault(TimeZone.getTimeZone("Asia/Shanghai"))
+            assertEquals("2026/11/20", GitHubUpdater.localDate(iso))
+            TimeZone.setDefault(TimeZone.getTimeZone("UTC"))
+            assertEquals("2026/11/19", GitHubUpdater.localDate(iso))
+        } finally {
+            TimeZone.setDefault(original)
+        }
+    }
+
+    @Test
+    fun localDate_fallsBackOnMalformedInput() {
+        // 解析不了就退回按原字符串截日期，宁可差一天也不要显示空。
+        assertEquals("2026/11/19", GitHubUpdater.localDate("2026-11-19 16:24"))
+        assertEquals("", GitHubUpdater.localDate(""))
     }
 }

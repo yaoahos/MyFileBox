@@ -27,6 +27,7 @@ import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
 import java.util.Locale
+import java.util.TimeZone
 import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
 import java.util.zip.ZipOutputStream
@@ -1308,7 +1309,7 @@ class LocalRepository(private val context: Context) {
         /** 列表里显示的紧凑日期，固定 yyyy/MM/dd。 */
         fun formatDate(ms: Long): String {
             if (ms <= 0) return ""
-            return SimpleDateFormat("yyyy/MM/dd", Locale.getDefault()).format(Date(ms))
+            return formatted("yyyy/MM/dd", ms)
         }
 
         /**
@@ -1318,7 +1319,7 @@ class LocalRepository(private val context: Context) {
          */
         fun formatStamp(ms: Long): String {
             if (ms <= 0) return ""
-            return SimpleDateFormat("yyyy/MM/dd HH:mm:ss", Locale.getDefault()).format(Date(ms))
+            return formatted("yyyy/MM/dd HH:mm:ss", ms)
         }
 
         /**
@@ -1327,14 +1328,38 @@ class LocalRepository(private val context: Context) {
          * 宫格一行排 4 格，宽度放不下 `yyyy/MM/dd HH:mm:ss`；同一天的文件靠时间区分、
          * 跨天的靠日期区分，才既省地方又能一眼看懂。列表不受此限，一律给全。
          */
-        fun formatGridStamp(ms: Long): String {
+        fun formatGridStamp(ms: Long, nowMs: Long = System.currentTimeMillis()): String {
             if (ms <= 0) return ""
-            val now = Calendar.getInstance()
+            val now = Calendar.getInstance().apply { timeInMillis = nowMs }
             val then = Calendar.getInstance().apply { timeInMillis = ms }
             val sameDay = now.get(Calendar.YEAR) == then.get(Calendar.YEAR) &&
                 now.get(Calendar.DAY_OF_YEAR) == then.get(Calendar.DAY_OF_YEAR)
-            return if (sameDay) SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date(ms))
-            else SimpleDateFormat("yyyy/MM/dd", Locale.getDefault()).format(Date(ms))
+            return if (sameDay) formatted("HH:mm:ss", ms) else formatted("yyyy/MM/dd", ms)
+        }
+
+        /**
+         * 按线程缓存格式化器。
+         *
+         * SimpleDateFormat 每次构造都要读本地化数据，并不便宜；列表行的显示时间是在
+         * 组合里现算的（回收站每行一次），滚动 / 反复重组时每行都新建一个纯属浪费。
+         * 它本身不是线程安全的，所以用 ThreadLocal 各存一份，既不共享也不重复构造。
+         */
+        private val formatters = object : ThreadLocal<MutableMap<String, SimpleDateFormat>>() {
+            override fun initialValue() = HashMap<String, SimpleDateFormat>(4)
+        }
+
+        private fun formatted(pattern: String, ms: Long): String {
+            // SimpleDateFormat 构造时会把默认时区/语言固化下来，用户改了系统时区或语言后，
+            // 旧实例仍按老口径格式化（跨零点时直接差一天）。缓存键带上这两项，
+            // 设置一变就换新实例，旧的自然被淘汰。
+            val zone = TimeZone.getDefault()
+            val locale = Locale.getDefault()
+            val key = pattern + '|' + zone.id + '|' + locale.toLanguageTag()
+            val cache = formatters.get() ?: HashMap<String, SimpleDateFormat>(4).also { formatters.set(it) }
+            val formatter = cache.getOrPut(key) {
+                SimpleDateFormat(pattern, locale).apply { timeZone = zone }
+            }
+            return formatter.format(Date(ms))
         }
 
         /**
@@ -1344,13 +1369,13 @@ class LocalRepository(private val context: Context) {
          * 就给时间部分；否则只留日期部分。不是日期形状的文本（如群晖共享卡的副标题）
          * 原样返回，别把「2 天前更新」按空格切成「2」。
          */
-        fun formatGridText(text: String): String {
+        fun formatGridText(text: String, nowMs: Long = System.currentTimeMillis()): String {
             val trimmed = text.trim()
             if (trimmed.isEmpty()) return ""
             val datePart = trimmed.substringBefore(" ").trim()
             if (!dateShape.matches(datePart)) return trimmed
             val timePart = trimmed.substringAfter(" ", "").trim()
-            val today = formatDate(System.currentTimeMillis())
+            val today = formatDate(nowMs)
             return if (timePart.isNotEmpty() && datePart == today) timePart else datePart
         }
 

@@ -327,7 +327,10 @@ internal fun AppViewModel.deleteFiles(
                 } else {
                     if (ctx == FileContext.SYNO) {
                         // 记下本次删除单元：回收站按整只文件夹展示/还原（#recycle 目录树区分不出来）。
-                        synoRecycleIndex.add(items.mapNotNull { synoRecycleRecordOf(it) })
+                        // 索引是本地 JSON，读写都要走 IO，别在 UI 线程上加一次文件读写。
+                        withContext(Dispatchers.IO) {
+                            synoRecycleIndex.add(items.mapNotNull { synoRecycleRecordOf(it) })
+                        }
                         refreshSyno()
                     }
                     reloadBrowserItems()

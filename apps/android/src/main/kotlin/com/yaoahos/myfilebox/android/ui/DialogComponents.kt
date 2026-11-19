@@ -89,6 +89,7 @@ import androidx.compose.material3.pulltorefresh.PullToRefreshState
 import androidx.compose.material3.pulltorefresh.PullToRefreshDefaults
 import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.getValue
@@ -126,7 +127,9 @@ import com.yaoahos.myfilebox.core.TabKey
 import com.yaoahos.myfilebox.android.R
 import com.yaoahos.myfilebox.android.data.ExtractConflict
 import com.yaoahos.myfilebox.android.data.LocalRepository
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import com.yaoahos.myfilebox.android.ui.theme.semanticColors
 
 @Composable
@@ -249,7 +252,14 @@ fun ExtractDialog(
                         modifier = Modifier.padding(top = 6.dp),
                         onCrumbClick = { index -> pickPath = segments[index].second }
                     )
-                    val subfolders = remember(pickPath) { listSubfolders(pickPath) }
+                    // 列目录要读盘：放在组合里同步列，目录条目一多就会卡住这一帧。
+                    // 改成 remember + LaunchedEffect，在 IO 线程列完再重组。
+                    var subfolders by remember(pickPath) {
+                        mutableStateOf(emptyList<Pair<String, String>>())
+                    }
+                    LaunchedEffect(pickPath) {
+                        subfolders = withContext(Dispatchers.IO) { listSubfolders(pickPath) }
+                    }
                     Column(
                         Modifier
                             .fillMaxWidth()
