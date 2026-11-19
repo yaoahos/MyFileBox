@@ -450,10 +450,19 @@ fun MyFileBoxApp(viewModel: AppViewModel) {
                         }
                         if (state.updateDownloading) {
                             Text(
-                                "下载中 ${state.updateProgress}%",
+                                "下载中 ${state.updateProgress}%（可在通知栏查看进度）",
                                 fontSize = 12.sp,
                                 color = MaterialTheme.colorScheme.primary,
                                 modifier = Modifier.padding(top = 10.dp)
+                            )
+                            LinearProgressIndicator(
+                                progress = { state.updateProgress.coerceIn(0, 100) / 100f },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(top = 6.dp)
+                                    .height(5.dp),
+                                color = MaterialTheme.colorScheme.primary,
+                                trackColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)
                             )
                         }
                         if (state.updateError != null) {

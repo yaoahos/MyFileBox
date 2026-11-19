@@ -1509,6 +1509,12 @@ internal fun normalizeDeclaredType(raw: String): String {
 
 internal fun AppViewModel.openLocalIntent(file: FileEntry, app: String = "") {
         val context = getApplication<Application>()
+        // 从应用内直接安装刚下载的更新包时，通知栏那条「已下载」就多余了，顺手撤掉，
+        // 免得装完再点它又拉一次同一个安装包。
+        val updateDir = java.io.File(context.cacheDir, "updates").absolutePath
+        if (file.path.startsWith(updateDir + java.io.File.separator)) {
+            com.yaoahos.myfilebox.android.update.UpdateNotifications.clear(context)
+        }
         runCatching {
             val uri = FileProvider.getUriForFile(context, "${context.packageName}.files", File(file.path))
             // 与「打开方式 / 默认打开方式」共用同一套判定：MIME 没信息量时按后缀名判。

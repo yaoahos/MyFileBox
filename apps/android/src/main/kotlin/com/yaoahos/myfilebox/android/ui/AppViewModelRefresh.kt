@@ -484,26 +484,34 @@ internal fun AppViewModel.dismissUpdateDialog() {
     /** 下载安装包到 cache/updates/ 后走应用既有的 APK 安装流。 */
 internal fun AppViewModel.downloadUpdate() {
         val info = state.updateInfo ?: return
+        if (state.updateDownloading) return
+        val app = getApplication<Application>()
         if (info.apkUrl.isBlank()) {
             state = state.copy(updateError = "该版本没有安装包，请到发布页下载")
             return
         }
         viewModelScope.launch {
             state = state.copy(updateDownloading = true, updateProgress = 0, updateError = null)
-            val target = java.io.File(
-                getApplication<Application>().cacheDir,
-                "updates/MyFileBox-${info.version}.apk"
-            )
+            val target = java.io.File(app.cacheDir, "updates/MyFileBox-${info.version}.apk")
+            // 通知栏进度与对话框进度同源：对话框可以随时关掉，关掉后也要能看到下载还在跑。
+            com.yaoahos.myfilebox.android.update.UpdateNotifications.ensureChannel(app)
+            com.yaoahos.myfilebox.android.update.UpdateNotifications.progress(app, -1)
+            var lastNotified = -2
             val result = runCatching {
                 withContext(Dispatchers.IO) {
                     com.yaoahos.myfilebox.android.update.GitHubUpdater.download(info.apkUrl, target) { percent ->
                         // 下载回调在 IO 线程；state 只能在主线程写，否则会和 Compose 读取竞争。
                         viewModelScope.launch { state = state.copy(updateProgress = percent) }
+                        if (percent != lastNotified) {
+                            lastNotified = percent
+                            com.yaoahos.myfilebox.android.update.UpdateNotifications.progress(app, percent)
+                        }
                     }
                 }
             }
             state = state.copy(updateDownloading = false)
             result.onSuccess {
+                com.yaoahos.myfilebox.android.update.UpdateNotifications.completed(app, info, target.absolutePath)
                 state = state.copy(updateInfo = null, message = "下载完成，正在打开安装…")
                 requestOpen(
                     FileEntry(
@@ -516,11 +524,47 @@ internal fun AppViewModel.downloadUpdate() {
                     )
                 )
             }.onFailure { e ->
+                com.yaoahos.myfilebox.android.update.UpdateNotifications.clear(app)
+                runCatching { target.delete() }
                 val msg = (e as? com.yaoahos.myfilebox.android.update.UpdateException)?.message
                     ?: "下载失败：${e.message ?: "网络异常"}"
-                state = state.copy(updateError = msg)
+                // 弹窗被关掉后只剩通知栏，失败原因必须改用顶部提示，否则用户看不到。
+                state = if (state.updateInfo == null) {
+                    state.copy(message = msg)
+                } else {
+                    state.copy(updateError = msg)
+                }
             }
         }
+    }
+
+
+    /**
+     * 点通知栏「已下载」进入：校验缓存路径后直接拉起安装器。
+     * 没有「安装未知应用」权限时复用应用内引导，从系统页回来自动续装。
+     */
+internal fun AppViewModel.installUpdateApk(rawPath: String) {
+        val app = getApplication<Application>()
+        val file = com.yaoahos.myfilebox.android.update.UpdateNotifications
+            .resolveUpdateApk(app.cacheDir, rawPath)
+        if (file == null) {
+            state = state.copy(message = "安装包已失效，请在应用内重新下载")
+            return
+        }
+        val entry = FileEntry(
+            id = file.absolutePath,
+            name = file.name,
+            kind = FileKind.APK,
+            path = file.absolutePath,
+            sizeLabel = LocalRepository.formatSize(file.length()),
+            timeLabel = ""
+        )
+        if (!canInstallPackages()) {
+            state = state.copy(installFile = entry)
+            return
+        }
+        val error = com.yaoahos.myfilebox.android.update.ApkInstaller.install(app, file).exceptionOrNull()
+        if (error != null) state = state.copy(message = error.message ?: "无法启动安装器，请手动安装")
     }
 
 

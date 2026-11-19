@@ -14,6 +14,8 @@ import androidx.core.content.ContextCompat
 import com.yaoahos.myfilebox.android.data.AppIconSwitcher
 import com.yaoahos.myfilebox.android.ui.AppViewModel
 import com.yaoahos.myfilebox.android.ui.MyFileBoxApp
+import com.yaoahos.myfilebox.android.ui.installUpdateApk
+import com.yaoahos.myfilebox.android.update.UpdateNotifications
 
 class MainActivity : ComponentActivity() {
     private val viewModel: AppViewModel by viewModels()
@@ -31,6 +33,9 @@ class MainActivity : ComponentActivity() {
         }
         // 点传输通知进来：进行中 → 传输页；已完成 → 直接打开那个文件。
         consumeTransferIntent(intent)
+        // 上个进程留下的更新进度条不会再有下载在跑，冷启动先清掉。
+        UpdateNotifications.clearStaleProgress(this)
+        consumeUpdateInstallIntent(intent)
         setContent {
             MyFileBoxApp(viewModel)
         }
@@ -40,6 +45,7 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         consumeTransferIntent(intent)
+        consumeUpdateInstallIntent(intent)
     }
 
     override fun onStop() {
@@ -53,5 +59,16 @@ class MainActivity : ComponentActivity() {
         val taskId = intent?.getStringExtra(TransferNotifications.EXTRA_OPEN_TASK) ?: return
         intent.removeExtra(TransferNotifications.EXTRA_OPEN_TASK)
         viewModel.handleTransferNotification(taskId)
+    }
+
+    /**
+     * 点「新版本已下载」通知进来：校验路径是自家缓存里的 apk 后再安装。
+     * MainActivity 必须 exported，这个 extra 任何应用都能伪造，所以只认 cacheDir/updates。
+     */
+    private fun consumeUpdateInstallIntent(intent: Intent?) {
+        val raw = intent?.getStringExtra(UpdateNotifications.EXTRA_INSTALL_APK) ?: return
+        intent.removeExtra(UpdateNotifications.EXTRA_INSTALL_APK)
+        UpdateNotifications.clear(this)
+        viewModel.installUpdateApk(raw)
     }
 }
