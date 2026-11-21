@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -52,6 +53,8 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -71,10 +74,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.yaoahos.myfilebox.android.data.LocalRepository
 import com.yaoahos.myfilebox.android.TransferNotifications
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
+import com.yaoahos.myfilebox.core.MODULE_LABEL_LOCAL
+import com.yaoahos.myfilebox.core.MODULE_LABEL_NET
+import com.yaoahos.myfilebox.core.MODULE_LABEL_SYNO
 import com.yaoahos.myfilebox.android.ui.theme.semanticColors
 
 private fun transferIcon(mode: TransferMode): ImageVector = when (mode) {
@@ -99,11 +103,11 @@ private fun transferModeLabel(mode: TransferMode): String = when (mode) {
 }
 
 private fun transferTime(epoch: Long): String =
-    if (epoch <= 0L) "刚刚" else SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(Date(epoch))
+    if (epoch <= 0L) "刚刚" else LocalRepository.formatWith("MM-dd HH:mm", epoch)
 
 /** 详情里的时间：卡片上的 `MM-dd HH:mm` 会被截断，这里给完整年月日。 */
 private fun fullTime(epoch: Long): String =
-    if (epoch <= 0L) "—" else SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date(epoch))
+    if (epoch <= 0L) "—" else LocalRepository.formatWith("yyyy-MM-dd HH:mm", epoch)
 
 /**
  * 长路径 / 长文件名在窄屏上要能完整换行：路径本身没有空格，Compose 默认不会断行。
@@ -306,17 +310,20 @@ fun TransferCenter(state: MyFileBoxState, vm: AppViewModel) {
     detailLive?.let { detail ->
         // 端名统一从记录的 sourceCtx / targetCtx 推：群晖的 Backup 与 SMB 里的 Backup 同名，
         // 详情里不带端名就分不清这条记录的两端各是哪一端。
+        // 端名与面包屑第一层同一口径（本地文件 / 群晖文件 / 网络文件），
+        // 后面接的连接名与路径才是这条记录真正的位置。
         fun endpointOf(ctx: String, net: String): String = when (ctx) {
-            FileContext.SYNO.name -> "群晖 NAS"
+            FileContext.SYNO.name -> MODULE_LABEL_SYNO
             FileContext.NET.name -> vm.state.connections.firstOrNull { it.id == net }
-                ?.let { "${it.protocol} · ${it.name}" } ?: "网络存储"
-            FileContext.LOCAL.name -> "内部存储"
+                ?.let { "$MODULE_LABEL_NET · ${it.name}" } ?: MODULE_LABEL_NET
+            FileContext.LOCAL.name -> MODULE_LABEL_LOCAL
             else -> ""
         }
         TransferDetailDialog(
             task = detail,
             endpoint = endpointOf(detail.targetCtx, detail.targetNet),
             sourceEndpoint = endpointOf(detail.sourceCtx, detail.sourceNet),
+            // 复制反馈在传输详情弹窗内部显示（顶部提示会被 AlertDialog 挡住）。
             onDismiss = { detailTask = null },
             onRetryChild = { child -> vm.retryTransferChild(detail, child) },
             onPauseChild = { child -> vm.pauseTransferChild(detail, child) },
@@ -339,6 +346,8 @@ private fun TransferDetailDialog(
     endpoint: String = "",
     /** 来源所属的端，口径同上。 */
     sourceEndpoint: String = "",
+    /** 点「来源 / 目标」整块复制之后的回调（弹窗内部用于显示「已复制」，默认空）。 */
+    onCopied: () -> Unit = {},
     onDismiss: () -> Unit,
     onRetryChild: (TransferChild) -> Unit,
     onPauseChild: (TransferChild) -> Unit,
@@ -349,6 +358,14 @@ private fun TransferDetailDialog(
 ) {
     val clipboard = LocalClipboardManager.current
     var showChildren by remember { mutableStateOf(false) }
+    // 复制反馈留在弹窗内：AlertDialog 独立窗口，页面顶部提示条会被挡在弹窗下方。
+    var copied by remember { mutableStateOf(false) }
+    LaunchedEffect(copied) {
+        if (copied) {
+            delay(1600)
+            copied = false
+        }
+    }
     val statusText = when (task.status) {
         TransferStatus.QUEUED -> "等待中"
         TransferStatus.RUNNING -> "传输中"
@@ -361,7 +378,19 @@ private fun TransferDetailDialog(
     AlertDialog(
         onDismissRequest = onDismiss,
         shape = RoundedCornerShape(20.dp),
-        title = { Text("传输详情", fontWeight = FontWeight.Bold, fontSize = 17.sp) },
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("传输详情", fontWeight = FontWeight.Bold, fontSize = 17.sp)
+                if (copied) {
+                    Text(
+                        "已复制",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.padding(start = 10.dp)
+                    )
+                }
+            }
+        },
         text = {
             // 限高 + 可滚动：文件再多也不会把弹窗撑满屏幕，全部内容都能翻到。
             Column(
@@ -410,7 +439,8 @@ private fun TransferDetailDialog(
                         else listOfNotNull(sourceEndpoint.takeIf { it.isNotBlank() }, paths.joinToString("\n"))
                             .joinToString(" · ")
                     },
-                    clipboard = clipboard
+                    clipboard = clipboard,
+                    onCopied = { copied = true; onCopied() }
                 )
                 EndpointChip(
                     icon = Icons.Outlined.Upload,
@@ -423,7 +453,8 @@ private fun TransferDetailDialog(
                         else listOfNotNull(endpoint.takeIf { it.isNotBlank() }, paths.joinToString("\n"))
                             .joinToString(" · ")
                     },
-                    clipboard = clipboard
+                    clipboard = clipboard,
+                    onCopied = { copied = true; onCopied() }
                 )
 
                 if (!task.error.isNullOrBlank()) {
@@ -451,8 +482,13 @@ private fun TransferDetailDialog(
                         onClick = { showChildren = !showChildren }
                     )
                     if (showChildren) {
-                        Column(Modifier.fillMaxWidth()) {
-                            task.children.forEach { child ->
+                        // 文件明细动辄几百上千条。这里原来是 Column + forEach：展开的一瞬间
+                        // 把所有子项一次组合完，文件夹任务越大卡得越久。改成定高的 LazyColumn，
+                        // 只组合可见的十几行；高度封顶后仍在外层弹窗里正常滚动。
+                        LazyColumn(Modifier.fillMaxWidth().heightIn(max = 300.dp)) {
+                            // 不挂 key：子项来自队列，理论上可能同名重复，重复 key 会让 Lazy 抛异常。
+                            // 这些行只是进度展示，按位置复用完全够用。
+                            items(task.children) { child ->
                                 TransferChildRow(
                                     child, task.status,
                                     onRetry = { onRetryChild(child) },
@@ -482,30 +518,35 @@ private fun TransferDetailDialog(
     )
 }
 
-/** 带图标与底色的「来源 / 目标」标签行，路径单独占一行可点复制。 */
+/**
+ * 带图标与底色的「来源 / 目标」标签行，整块可点即复制。
+ *
+ * 不再在标题旁挂「复制路径」字样：整行本来就是热区，多一个提示反而显得要用户
+ * 去点某个小图标。点完由调用方在顶部给「已复制」。
+ */
 @Composable
 private fun EndpointChip(
     icon: ImageVector,
     label: String,
     tint: Color,
     value: String,
-    clipboard: androidx.compose.ui.platform.ClipboardManager
+    clipboard: androidx.compose.ui.platform.ClipboardManager,
+    onCopied: () -> Unit
 ) {
     Column(
         Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(10.dp))
-            .clickable { clipboard.setText(AnnotatedString(value)) }
+            .clickable {
+                clipboard.setText(AnnotatedString(value))
+                onCopied()
+            }
             .background(tint.copy(alpha = 0.08f))
             .padding(horizontal = 10.dp, vertical = 7.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Icon(icon, null, tint = tint, modifier = Modifier.size(14.dp))
             Text(label, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = tint, modifier = Modifier.padding(start = 5.dp))
-            Icon(
-                Icons.Outlined.ContentCopy, "复制路径", tint = tint.copy(alpha = 0.7f),
-                modifier = Modifier.size(12.dp).padding(start = 4.dp)
-            )
         }
         Text(
             // 多条路径用换行分开（多选时来源 / 目标各条各占一行），逐行做长路径断行。

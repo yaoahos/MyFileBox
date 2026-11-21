@@ -87,6 +87,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
@@ -227,16 +228,20 @@ fun MyFileBoxApp(viewModel: AppViewModel) {
             state.openWith != null -> viewModel.closeOpenWith()
             state.transfer != null -> viewModel.closeTransfer()
             // —— 以下与 pageKeyOf 的判定顺序一致 ——
-            state.search != null -> viewModel.closeSearch()
+            // 系统页（设置 / 外观 / 关于 / 备份同步）排第一：pageKeyOf 里它们优先级最高，
+            // 返回也必须先作用在看得见的这一页上。否则从回收站 / 搜索 / 传输进设置后，
+            // 第一次返回会先把下层那个看不见的覆盖页关掉，页面纹丝不动，要按两次。
+            state.screen != Screen.MAIN -> viewModel.closeScreen()
+            // 覆盖页按「后打开的盖住先打开的」排序：传输最上，其次回收、共享、搜索。
+            // 必须与 pageKeyOf 完全一致，否则第一次返回会去关下层那个看不见的页面。
+            state.transferCenterOpen -> viewModel.closeTransferCenter()
             // 回收站多选态先退出选择，再关页面（清单 6）。
             state.recycleOpen && state.recycleSelecting -> viewModel.clearRecycleSelection()
+            // 群晖回收站钻进了 #recycle 子目录：返回先回上一层，与左上角箭头同一条路径。
+            state.recycleOpen && state.recycleDir.isNotBlank() -> viewModel.backRecycleFolder()
             state.recycleOpen -> viewModel.closeRecycle()
             state.shareManagerOpen -> viewModel.closeShareManager()
-            state.transferCenterOpen -> viewModel.closeTransferCenter()
-            // 设置 / 主题与外观 / 关于必须排在浏览页、多选态之前：这些下层状态在
-            // 二级页上根本不可见，先清它们等于「按了没反应」。
-            // 用「不在首页」而不是逐个列举：以后再加二级页不用回来补分支。
-            state.screen != Screen.MAIN -> viewModel.closeScreen()
+            state.search != null -> viewModel.closeSearch()
             // 浏览页多选：与 BrowserScreen 内部的 BackHandler 对齐，先清多选再退页面。
             state.browser != null && (state.selectionActive || state.selected.isNotEmpty()) -> viewModel.clearSelection()
             state.browser != null -> viewModel.backFromBrowser()
@@ -248,7 +253,6 @@ fun MyFileBoxApp(viewModel: AppViewModel) {
             // 首页多选时返回键先退出选择态，不要直接退出应用。
             state.homeSelecting -> viewModel.clearHomeSelection()
             state.screen == Screen.MAIN && state.screenStack.isNotEmpty() -> viewModel.closeScreen()
-            state.screen != Screen.MAIN -> viewModel.closeScreen()
             // 其它栏首页：回有效默认启动页（设置里可改，不再固定回第一栏）。
             else -> viewModel.backToHomeTab()
         }
@@ -418,13 +422,16 @@ fun MyFileBoxApp(viewModel: AppViewModel) {
             )
         }
         state.updateInfo?.let { info ->
+            // LocalUriHandler 是 @Composable 读取，必须在组合作用域里取，不能写进 onClick。
+            val updateUriHandler = LocalUriHandler.current
             AlertDialog(
                 onDismissRequest = viewModel::dismissUpdateDialog,
                 title = { Text("发现新版本 ${info.version}", fontWeight = FontWeight.Bold) },
                 text = {
                     Column(
                         Modifier
-                            .heightIn(max = 380.dp)
+                            // 统一口径：按「屏高 - 键盘预留」算，横屏不会被 380dp 顶出屏幕。
+                            .heightIn(max = rememberDialogContentMaxHeight())
                             .verticalScroll(rememberScrollState())
                     ) {
                         // Release 正文原样搬来时带 `**` 标题、`- ` 列表符和噪声行，必须过
@@ -447,6 +454,15 @@ fun MyFileBoxApp(viewModel: AppViewModel) {
                                     modifier = Modifier.padding(top = 4.dp)
                                 )
                             }
+                        }
+                        if (info.apkUrl.isBlank()) {
+                            Text(
+                                "这条发布没有附带安装文件，请到发布页手动下载。",
+                                fontSize = 12.sp,
+                                lineHeight = 17.sp,
+                                color = MutedText,
+                                modifier = Modifier.padding(top = 10.dp)
+                            )
                         }
                         if (state.updateDownloading) {
                             Text(
@@ -477,10 +493,28 @@ fun MyFileBoxApp(viewModel: AppViewModel) {
                     }
                 },
                 confirmButton = {
-                    TextButton(
-                        enabled = !state.updateDownloading && info.apkUrl.isNotBlank(),
-                        onClick = viewModel::downloadUpdate
-                    ) { Text(if (state.updateDownloading) "下载中…" else "立即更新") }
+                    if (info.apkUrl.isBlank()) {
+                        // 这条发布没有附带 .apk 资产：按钮以前是静默 disabled，
+                        // 用户看到「发现新版本」却点不动、也没有任何说明。
+                        // 改成直接去发布页，路走得通。
+                        TextButton(
+                            enabled = !state.updateDownloading,
+                            onClick = {
+                                runCatching {
+                                    updateUriHandler.openUri(
+                                        info.pageUrl.ifBlank {
+                                            com.yaoahos.myfilebox.android.update.GitHubUpdater.RELEASES_PAGE
+                                        }
+                                    )
+                                }
+                            }
+                        ) { Text("打开发布页") }
+                    } else {
+                        TextButton(
+                            enabled = !state.updateDownloading,
+                            onClick = viewModel::downloadUpdate
+                        ) { Text(if (state.updateDownloading) "下载中…" else "立即更新") }
+                    }
                 },
                 dismissButton = {
                     TextButton(onClick = viewModel::dismissUpdateDialog) { Text("稍后") }
@@ -495,7 +529,8 @@ fun MyFileBoxApp(viewModel: AppViewModel) {
                 text = {
                     Column(
                         Modifier
-                            .heightIn(max = 420.dp)
+                            // 同上：横屏屏高只有 360dp 上下，写死 420dp 会把标题和按钮顶出屏幕。
+                            .heightIn(max = rememberDialogContentMaxHeight())
                             .verticalScroll(rememberScrollState())
                     ) {
                         if (state.updateLogNotes.isEmpty()) {
@@ -616,9 +651,30 @@ fun MyFileBoxApp(viewModel: AppViewModel) {
 
 @Composable
 private fun FileDetailDialog(file: FileEntry, vm: AppViewModel, onDismiss: () -> Unit) {
+    // 弹窗是独立窗口，页面顶部的「已复制」提示会被挡在弹窗下方看不见。
+    // 复制反馈放在弹窗内部（标题旁），几秒后自动消失。
+    var copied by remember { mutableStateOf(false) }
+    LaunchedEffect(copied) {
+        if (copied) {
+            delay(1600)
+            copied = false
+        }
+    }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("文件详情", fontWeight = FontWeight.Bold) },
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("文件详情", fontWeight = FontWeight.Bold)
+                if (copied) {
+                    Text(
+                        "已复制",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.padding(start = 10.dp)
+                    )
+                }
+            }
+        },
         text = {
             Column(
                 Modifier
@@ -637,21 +693,16 @@ private fun FileDetailDialog(file: FileEntry, vm: AppViewModel, onDismiss: () ->
                 // 到了详情页再省就查不清到底是哪个时间点。
                 DetailRow("修改时间", if (file.modified > 0) LocalRepository.formatFull(file.modified) else file.timeLabel.ifBlank { "—" })
                 DetailRow("所在位置", file.folder.ifBlank { "内部存储" })
-                DetailRow("完整路径", file.path)
-                // 复制路径与其它行一样左对齐的纯文字按钮。
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .clickable { vm.copyText(file.path, "路径") }
-                        .padding(vertical = 6.dp)
-                ) {
-                    Text("复制路径", fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
-                }
+                // 路径行整行可点：复制反馈在弹窗内给（顶部提示会被弹窗挡住）。
+                DetailRow("完整路径", file.path, onClick = {
+                    vm.copyToClipboard(file.path, "路径")
+                    copied = true
+                })
                 HorizontalDivider(
                     Modifier.padding(top = 4.dp),
                     color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)
                 )
-                // 传输规则默认折叠，点一下展开、再点收回，视觉与「复制路径」同款文字按钮。
+                // 传输规则默认折叠，点一下展开、再点收回，与上面路径行同样的强调色文字。
                 var rulesExpanded by remember { mutableStateOf(false) }
                 Row(
                     Modifier
@@ -688,8 +739,14 @@ private fun FileDetailDialog(file: FileEntry, vm: AppViewModel, onDismiss: () ->
 }
 
 @Composable
-private fun DetailRow(label: String, value: String) {
-    Row(Modifier.fillMaxWidth().padding(vertical = 5.dp)) {
+private fun DetailRow(label: String, value: String, onClick: (() -> Unit)? = null) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            // 可复制行整行都是热区，不只是文字本身——长路径换行后也点得中。
+            .then(if (onClick != null) Modifier.clip(RoundedCornerShape(8.dp)).clickable(onClick = onClick) else Modifier)
+            .padding(vertical = 5.dp)
+    ) {
         Text(label, fontSize = 12.sp, color = MutedText, modifier = Modifier.widthIn(min = 64.dp))
         Text(
             value.ifBlank { "—" },
@@ -717,7 +774,6 @@ private fun PreviewDialog(file: FileEntry, onClose: () -> Unit) {
             color = MaterialTheme.colorScheme.surface,
             modifier = Modifier
                 .fillMaxWidth()
-                .imePadding()
                 .navigationBarsPadding()
         ) {
             Column(Modifier.padding(18.dp)) {
@@ -882,6 +938,38 @@ private fun AudioPreview(path: String) {
     }
 }
 
+/**
+ * 应用图标缓存 + 异步加载。
+ *
+ * 「打开方式」弹窗里每个应用一行图标。图标要从 PackageManager 取 Drawable 再缩放成
+ * Bitmap，纯同步做在主线程上，弹窗刚出现那一帧就要多花几十毫秒——表现为弹窗「先卡住
+ * 再出现」。这里改成：能命中缓存就立即用，没命中先给占位、在 IO 线程解好再补。
+ */
+private object AppIconCache {
+    private val lru = object : android.util.LruCache<String, ImageBitmap>(64) {}
+    fun get(pkg: String): ImageBitmap? = lru.get(pkg)
+    fun put(pkg: String, icon: ImageBitmap) = lru.put(pkg, icon)
+}
+
+@Composable
+private fun rememberAppIcon(pkg: String): ImageBitmap? {
+    val pm = LocalContext.current.packageManager
+    var icon by remember(pkg) { mutableStateOf(AppIconCache.get(pkg)) }
+    LaunchedEffect(pkg) {
+        AppIconCache.get(pkg)?.let { icon = it; return@LaunchedEffect }
+        val loaded = withContext(Dispatchers.IO) {
+            runCatching {
+                pm.getApplicationIcon(pkg).toBitmap(38, 38).asImageBitmap()
+            }.getOrNull()
+        }
+        if (loaded != null) {
+            AppIconCache.put(pkg, loaded)
+            icon = loaded
+        }
+    }
+    return icon
+}
+
 @Composable
 private fun OpenWithDialog(
     file: FileEntry,
@@ -894,12 +982,11 @@ private fun OpenWithDialog(
     onExtract: () -> Unit,
     onExtractAlways: () -> Unit
 ) {
-    val context = LocalContext.current
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("打开方式", fontWeight = FontWeight.Bold) },
         text = {
-            Column(Modifier.imePadding()) {
+            Column {
                 Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(bottom = 6.dp)) {
                     Icon(
                         if (file.kind == FileKind.AUDIO) Icons.Outlined.Audiotrack else Icons.Outlined.VideoFile,
@@ -994,12 +1081,11 @@ private fun OpenWithDialog(
                 // 320dp 时代它们会被挤出可视区，用户以为「列表里没有 WPS」。
                 Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState())) {
                     apps.forEach { app ->
-                        val icon = remember(app.pkg) {
-                            runCatching {
-                                context.packageManager.getApplicationIcon(app.pkg)
-                                    .toBitmap(38, 38).asImageBitmap()
-                            }.getOrNull()
-                        }
+                        // 图标异步取：原来在组合里同步 getApplicationIcon().toBitmap()，
+                        // 每多一个应用就多一次解码 + 一次缩放，弹窗刚出来的那一帧全压在主线程上
+                        // （实测最差单帧 117ms，其中测量布局就占 48ms）。现在先画占位，
+                        // 解好再补上，弹窗动画期间不再有这段同步开销。
+                        val icon = rememberAppIcon(app.pkg)
                         Row(
                             Modifier
                                 .fillMaxWidth()

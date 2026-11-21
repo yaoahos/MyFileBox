@@ -377,12 +377,37 @@ data class MyFileBoxState(
     val recycleLoading: Boolean = false,
     /** 回收站归属（清单 5）：本地回收只管本地，群晖回收走 #recycle。 */
     val recycleContext: FileContext = FileContext.LOCAL,
+    /**
+     * 群晖回收站当前钻进去的 `#recycle` 子目录；空串 = 汇总视图（各共享一层 + 删除单元）。
+     *
+     * DSM 的回收站保留原路径结构，删 `/photo/trip/a.jpg` 后落到
+     * `/photo/#recycle/trip/a.jpg`。以前把整棵树 BFS 打平成一张文件清单，
+     * 用户只看到一堆同名文件、看不出归属；现在文件夹点得进去，逐层展开。
+     * 本地回收站没有这个概念（每个条目就是一个独立删除单元），永远为空。
+     */
+    val recycleDir: String = "",
+    /**
+     * 群晖回收站每一层的最近一次结果：dir（空串 = 汇总视图）→ 条目。
+     *
+     * 只为一个目的：进出 `#recycle` 子目录时页面是要做转场的，如果返回上一层
+     * 还要等一次网络请求，滑进来的就是「正在加载回收站…」的空白页——与浏览页
+     * 返回时直接显示已有列表的观感对不上。有缓存就先顶上，随后静默刷新。
+     */
+    val recycleLevels: Map<String, List<RecycleItem>> = emptyMap(),
     /** 群晖共享管理（清单 4）：统一查看 / 取消共享链接。 */
     val shareManagerOpen: Boolean = false,
     val shareLinks: List<com.yaoahos.myfilebox.core.ShareLink> = emptyList(),
     val shareLinksLoading: Boolean = false,
     /** 群晖收藏解析结果（收藏页展示用，文件与文件夹都要能看）。 */
     val synoFavorites: List<FileEntry> = emptyList(),
+    /**
+     * 群晖服务器上真实存在的收藏路径（SYNO.FileStation.Favorite list 的结果）。
+     *
+     * 本机 `prefs.favorites` 只记录「在这台设备上点过收藏」；DSM 网页端或另一台设备
+     * 加的收藏它不知道。不同步的后果很直接：对已收藏的文件夹再点收藏会被服务器
+     * 回 800（该路径已在收藏里），界面却显示成失败。这里只放运行时结果，不落盘。
+     */
+    val synoFavoritePaths: Set<String> = emptySet(),
     val search: SearchState? = null,
     val searchIndexing: Boolean = false,
     /**
@@ -960,7 +985,7 @@ fun formatSyncTime(at: Long): String {
     if (at <= 0L) return "—"
     val now = System.currentTimeMillis()
     val pattern = if (now - at < 365L * 24 * 3600 * 1000) "MM/dd HH:mm" else "yyyy/MM/dd HH:mm"
-    return java.text.SimpleDateFormat(pattern, java.util.Locale.CHINA).format(java.util.Date(at))
+    return LocalRepository.formatWith(pattern, at)
 }
 
 fun fileKindLabel(kind: FileKind): String = when (kind) {

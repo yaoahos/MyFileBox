@@ -98,6 +98,13 @@ internal fun AppViewModel.selectTab(tab: TabKey) {
             homeSelected = emptySet(),
             homeSelecting = false,
             search = null,
+            // 覆盖页状态一并清掉：底栏只在首页可见，正常不会带着覆盖页切栏，
+            // 但万一状态残留，pageKeyOf 会让新栏首页被旧覆盖页盖住（点了像没反应）。
+            // recycleDir 一起归零：不然再进回收站会停在上次钻进去的子目录。
+            recycleOpen = false,
+            recycleDir = "",
+            shareManagerOpen = false,
+            transferCenterOpen = false,
             // 换底栏 = 换当前位置，筛选词不沿用。
             nameFilter = "",
             extensionFilter = "",
@@ -137,7 +144,10 @@ internal fun AppViewModel.goHome(ctx: FileContext) {
             homeSelecting = false,
             search = null,
             recycleOpen = false,
+            recycleDir = "",
             shareManagerOpen = false,
+            // 传输中心也是覆盖页，回首页必须一起清掉，否则页面上还盖着传输列表。
+            transferCenterOpen = false,
             navDir = -1
         )
     }
@@ -564,12 +574,18 @@ internal fun AppViewModel.consumeMessage(message: String? = null) {
 internal fun AppViewModel.showMessage(message: String) { state = state.copy(message = message) }
 
 
-    /** 复制到剪贴板并给成功提示（清单 9：复制路径这类操作此前完全没有反馈）。 */
+    /** 复制到剪贴板并在顶部给出「已复制」——详情里的路径都是整行点一下即复制。 */
 internal fun AppViewModel.copyText(text: String, label: String = "内容") {
+        copyToClipboard(text, label)
+        showMessage("已复制")
+    }
+
+    /** 只写入剪贴板、不弹顶部提示：AlertDialog 是独立窗口，顶部提示条会在弹窗下方看不见，
+     *  这类场景由弹窗自己在内部显示「已复制」（见 FileDetailDialog / RecycleDetailDialog）。 */
+internal fun AppViewModel.copyToClipboard(text: String, label: String = "内容") {
         val clipboard = getApplication<Application>()
             .getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
         clipboard.setPrimaryClip(ClipData.newPlainText(label, text))
-        showMessage("复制成功")
     }
 
 

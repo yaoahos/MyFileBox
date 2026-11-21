@@ -53,6 +53,9 @@ import com.yaoahos.myfilebox.android.data.NetStatus
 import com.yaoahos.myfilebox.android.data.offlineNetworkMessage
 import com.yaoahos.myfilebox.android.data.networkStatusNotice
 import com.yaoahos.myfilebox.core.AppPrefs
+import com.yaoahos.myfilebox.core.MODULE_LABEL_LOCAL
+import com.yaoahos.myfilebox.core.MODULE_LABEL_NET
+import com.yaoahos.myfilebox.core.MODULE_LABEL_SYNO
 import com.yaoahos.myfilebox.core.FileEntry
 import com.yaoahos.myfilebox.core.FileKind
 import com.yaoahos.myfilebox.core.FileKinds
@@ -244,10 +247,10 @@ internal fun AppViewModel.startHomeFolderTransfer(mode: TransferMode, folder: Fo
         )
         val destinations = state.localFolders
             .filter { it.path != folder.path }
-            .map { Destination(DestType.LOCAL, it.path, it.name, "内部存储 / ${it.name}", it.path) }
+            .map { Destination(DestType.LOCAL, it.path, it.name, "$MODULE_LABEL_LOCAL / ${it.name}", it.path) }
             .ifEmpty {
                 val downloads = local.downloadsDir().absolutePath
-                listOf(Destination(DestType.LOCAL, downloads, "下载", "内部存储 / 下载", downloads))
+                listOf(Destination(DestType.LOCAL, downloads, "下载", "$MODULE_LABEL_LOCAL / 下载", downloads))
             }
         state = state.copy(
             transfer = TransferRequest(mode, listOf(entry), FileContext.LOCAL, null, destinations)

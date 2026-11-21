@@ -55,6 +55,9 @@ import com.yaoahos.myfilebox.android.data.NetStatus
 import com.yaoahos.myfilebox.android.data.offlineNetworkMessage
 import com.yaoahos.myfilebox.android.data.networkStatusNotice
 import com.yaoahos.myfilebox.core.AppPrefs
+import com.yaoahos.myfilebox.core.MODULE_LABEL_LOCAL
+import com.yaoahos.myfilebox.core.MODULE_LABEL_NET
+import com.yaoahos.myfilebox.core.MODULE_LABEL_SYNO
 import com.yaoahos.myfilebox.core.FileEntry
 import com.yaoahos.myfilebox.core.FileKind
 import com.yaoahos.myfilebox.core.FileKinds
@@ -865,9 +868,9 @@ internal fun AppViewModel.enterTransferFolder(ctx: FileContext, netId: String?, 
 
 
 private fun AppViewModel.transferCtxLabel(ctx: FileContext): String = when (ctx) {
-        FileContext.LOCAL -> "内部存储"
-        FileContext.SYNO -> "群晖 NAS"
-        FileContext.NET -> "网络存储"
+        FileContext.LOCAL -> MODULE_LABEL_LOCAL
+        FileContext.SYNO -> MODULE_LABEL_SYNO
+        FileContext.NET -> MODULE_LABEL_NET
     }
 
 /**
@@ -925,7 +928,10 @@ internal fun AppViewModel.performTransfer(destination: Destination) {
             val sameSide = when (request.ctx) {
                 FileContext.LOCAL -> destination.type == DestType.LOCAL
                 FileContext.SYNO -> destination.type == DestType.SYNO
-                FileContext.NET -> destination.type == DestType.NET && destination.key == request.netId
+                // NET 用「连接 id」比：两边都可能因为老状态 / 搜索页来源而缺 netId，
+                // 统一按空串比较，否则 null 与 "" 不等会把同端复制判成跨端。
+                FileContext.NET -> destination.type == DestType.NET &&
+                    destination.key.orEmpty() == request.netId.orEmpty()
             }
             if (!sameSide) {
                 state = state.copy(message = "跨端文件只能用上传 / 下载传输，粘贴仅支持同一端内")
@@ -1234,10 +1240,13 @@ internal fun AppViewModel.cleanError(error: String?, verb: String): String {
 
     /** 记录的「从哪来」：优先文件所在目录，多选时给出上级目录 + 数量。 */
 internal fun AppViewModel.sourceLabelOf(request: TransferRequest): String {
+        // 端名与面包屑第一层同一口径：本地文件 / 群晖文件 / 网络文件。
+        // 网络端后面接连接名，用户才分得清是哪一个位置。
         val root = when (request.ctx) {
-            FileContext.LOCAL -> "内部存储"
-            FileContext.SYNO -> "群晖 NAS"
-            FileContext.NET -> state.connections.firstOrNull { it.id == request.netId }?.name ?: "网络存储"
+            FileContext.LOCAL -> MODULE_LABEL_LOCAL
+            FileContext.SYNO -> MODULE_LABEL_SYNO
+            FileContext.NET -> state.connections.firstOrNull { it.id == request.netId }
+                ?.let { "$MODULE_LABEL_NET · ${it.name}" } ?: MODULE_LABEL_NET
         }
         val first = request.items.firstOrNull() ?: return root
         val dir = first.path.trimEnd('/').substringBeforeLast('/').ifBlank { "/" }
@@ -2455,7 +2464,11 @@ internal suspend fun AppViewModel.copyOrMove(request: TransferRequest, destinati
                 dsm.copyMove(session, request.items.map { it.path }, destination.path, request.mode == TransferMode.MOVE)
             }
             FileContext.NET -> {
-                val conn = state.connections.firstOrNull { it.id == request.netId } ?: return false
+                // 连接按「目标」找：同端复制的目的一定义在同一个连接上，
+                // 用 destination.key 比 request.netId 更不容易受剪贴板来源字段缺失影响。
+                val conn = state.connections.firstOrNull {
+                    it.id == destination.key || it.id == request.netId
+                } ?: return false
                 network.copyMove(conn, request.items.map { it.path }, destination.path, request.mode == TransferMode.MOVE)
             }
         }
@@ -2466,10 +2479,10 @@ internal fun AppViewModel.destinationsFor(mode: TransferMode, ctx: FileContext):
         // 只认真实绝对路径：localFolders 里万一混进「最近 / 收藏」这类虚拟区域，
         // 复制 / 移动会写到非法位置（或干脆建出一个叫「最近」的目录），这里直接挡掉。
         val locals = state.localFolders.filter { it.path.startsWith("/") }
-            .map { Destination(DestType.LOCAL, it.path, it.name, "内部存储 / ${it.name}", it.path) }
-            .ifEmpty { listOf(Destination(DestType.LOCAL, local.downloadsDir().absolutePath, "下载", "内部存储 / 下载", local.downloadsDir().absolutePath)) }
+            .map { Destination(DestType.LOCAL, it.path, it.name, "$MODULE_LABEL_LOCAL / ${it.name}", it.path) }
+            .ifEmpty { listOf(Destination(DestType.LOCAL, local.downloadsDir().absolutePath, "下载", "$MODULE_LABEL_LOCAL / 下载", local.downloadsDir().absolutePath)) }
         val syno = if (state.session != null) state.shares.map {
-            Destination(DestType.SYNO, it.path, it.title, "群晖 NAS / ${it.title}", it.path)
+            Destination(DestType.SYNO, it.path, it.title, "$MODULE_LABEL_SYNO / ${it.title}", it.path)
         } else emptyList()
         // 不要只放 online 的连接：从未测试过的连接 online=false，会让「上传」
         // 直接变成「没有可用的目标位置」。离线的连接仍可选，失败时给明确原因。
@@ -2478,21 +2491,29 @@ internal fun AppViewModel.destinationsFor(mode: TransferMode, ctx: FileContext):
             // FTP / SFTP / SMB 用远端路径，空路径回退到 "/"。
             val root = network.rootPath(it)
             val suffix = if (it.online) "" else " · 未连接"
-            Destination(DestType.NET, it.id, it.name, "${it.protocol} / ${it.host}$suffix", root)
+            Destination(DestType.NET, it.id, it.name, "$MODULE_LABEL_NET / ${it.name}$suffix", root)
         }
         return when (mode) {
             TransferMode.DOWNLOAD -> locals
             TransferMode.UPLOAD -> syno + net
             // 同端复制/移动只给同端目标，跨端一律走上传/下载。
+            // 连接 id 缺失时（老状态）只在「恰好一个网络位置」时兜底，
+            // 否则会把别的连接列进来，选中后又被判成跨端。
             TransferMode.COPY -> when (ctx) {
                 FileContext.LOCAL -> locals
                 FileContext.SYNO -> syno
-                FileContext.NET -> net.filter { it.key == state.browser?.netId }
+                FileContext.NET -> net.filter {
+                    it.key == state.browser?.netId ||
+                        (state.browser?.netId.isNullOrBlank() && net.size == 1)
+                }
             }
             TransferMode.MOVE -> when (ctx) {
                 FileContext.LOCAL -> locals
                 FileContext.SYNO -> syno
-                FileContext.NET -> net.filter { it.key == state.browser?.netId }
+                FileContext.NET -> net.filter {
+                    it.key == state.browser?.netId ||
+                        (state.browser?.netId.isNullOrBlank() && net.size == 1)
+                }
             }
         }
     }
@@ -2514,7 +2535,7 @@ internal suspend fun AppViewModel.childDirectories(dest: Destination): List<Dest
                     .map { child ->
                         Destination(
                             DestType.LOCAL, child.absolutePath, child.name,
-                            "内部存储 / ${child.name}", child.absolutePath
+                            "$MODULE_LABEL_LOCAL / ${child.name}", child.absolutePath
                         )
                     }
             }.getOrDefault(emptyList())
@@ -2523,7 +2544,7 @@ internal suspend fun AppViewModel.childDirectories(dest: Destination): List<Dest
                 runCatching {
                     dsm.list(session, dest.path).filter { it.isFolder }.map { item ->
                         val child = joinRemote(dest.path, item.name)
-                        Destination(DestType.SYNO, child, item.name, "群晖 NAS / ${item.name}", child)
+                        Destination(DestType.SYNO, child, item.name, "$MODULE_LABEL_SYNO / ${item.name}", child)
                     }
                 }.getOrDefault(emptyList())
             }
@@ -2533,7 +2554,7 @@ internal suspend fun AppViewModel.childDirectories(dest: Destination): List<Dest
                 runCatching {
                     network.list(conn, dest.path).filter { it.isFolder }.map { item ->
                         val child = joinRemote(dest.path, item.name)
-                        Destination(DestType.NET, dest.key, item.name, "${conn.protocol} / ${item.name}", child)
+                        Destination(DestType.NET, dest.key, item.name, "$MODULE_LABEL_NET / ${item.name}", child)
                     }
                 }.getOrDefault(emptyList())
             }

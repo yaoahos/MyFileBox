@@ -47,7 +47,7 @@ private const val PAGE_TRANSFER = "transfer"
  *  4 群晖登录页 / 编辑连接页                              -> login/SYNO
  *  5 文件夹页、8 个文件分类页、收藏页、共享文件夹页、网络位置页 -> browser/{...}
  *  6 搜索页                                                -> search/{ctx}
- *  7 回收站（本地 / 群晖）                                 -> recycle/{ctx}
+ *  7 回收站（本地 / 群晖，含 #recycle 的每一层）            -> recycle/{ctx}/{dir}
  *  8 共享链接管理                                          -> shares
  *  9 设置页 / 关于页                                       -> settings / about
  *
@@ -59,14 +59,30 @@ internal fun isHomePageKey(key: String): Boolean =
     key.startsWith(PAGE_HOME) || key.startsWith(PAGE_LOGIN)
 
 internal fun pageKeyOf(s: MyFileBoxState): String = when {
-    s.search != null -> "$PAGE_SEARCH${s.search.ctx}"
-    s.recycleOpen -> "$PAGE_RECYCLE${s.recycleContext}"
-    s.shareManagerOpen -> PAGE_SHARES
-    s.transferCenterOpen -> PAGE_TRANSFER
+    // 系统页（设置 / 外观 / 关于 / 备份同步）排在最前面。
+    // 这几页可以从搜索、回收站、分享、传输这些覆盖页里的「更多 → 设置」进入，
+    // 而覆盖页的状态字段在进设置时并不会被清掉 —— 只要它们排在前面，页面 key
+    // 就还是覆盖页，表现就是「点设置没反应」。返回时 screen 回到 MAIN，覆盖页
+    // 状态仍在，页面自动回到原处，所以这里只需要调整顺序，不用清状态。
     s.screen == Screen.SETTINGS -> PAGE_SETTINGS
     s.screen == Screen.APPEARANCE -> PAGE_APPEARANCE
     s.screen == Screen.ABOUT -> PAGE_ABOUT
     s.screen == Screen.BACKUP_SYNC -> PAGE_BACKUP_SYNC
+    // 覆盖页之间可以互相跳转（搜索 → 回收、回收 → 传输、搜索 → 传输……），
+    // 而跳转时下层那个状态字段不会清空。静态的 when 只能表达固定优先级，
+    // 所以这里的顺序必须等于「可到达的打开顺序」：后打开的排在前面。
+    //   传输 ← 回收 / 搜索 / 分享（各页「更多」里都有）
+    //   回收 ← 搜索（搜索页「更多」里有收藏 / 回收 / 共享）
+    //   分享 ← 搜索（群晖搜索页「更多」里有共享）
+    // 旧顺序把 search / recycleOpen 放在 transferCenterOpen 之前，于是
+    // 从回收站或搜索页点「传输」时页面 key 不变，表现就是「点了没反应」。
+    s.transferCenterOpen -> PAGE_TRANSFER
+    // 回收站的 key 必须带「当前钻到 #recycle 的哪一层」。
+    // 只写 recycle/{ctx} 时，进 / 出子目录 key 不变，AnimatedContent 不认这是一次
+    // 页面切换，内容直接硬切、没有任何位移——与浏览页（key 含 path）对比就是两套观感。
+    s.recycleOpen -> "$PAGE_RECYCLE${s.recycleContext}/${s.recycleDir}"
+    s.shareManagerOpen -> PAGE_SHARES
+    s.search != null -> "$PAGE_SEARCH${s.search.ctx}"
     s.browser != null -> browserKeyOf(s.browser)
     s.tab == TabKey.SYNO && (s.connectionEditing || s.session == null) -> "$PAGE_LOGIN${s.tab}"
     else -> "$PAGE_HOME${s.tab}"
@@ -138,6 +154,14 @@ fun PageHost(
     // 设置页的滚动状态同样常驻：从「关于 / 主题与外观 / 备份与同步」返回时留在原位。
     val settingsListState = remember { LazyListState() }
     var previousPageKey by remember { mutableStateOf("") }
+    // 离开回收站就把「钻到第几层」归零：切底栏、去设置、被别的覆盖页盖住再回来，
+    // 都必须从各共享 #recycle 的汇总层开始（之前 recycleDir 会残留，回来停在子目录）。
+    LaunchedEffect(pageKey) {
+        if (!pageKey.startsWith(PAGE_RECYCLE) && liveState.recycleDir.isNotBlank()) {
+            vm.resetRecycleToSummary()
+        }
+    }
+
     LaunchedEffect(pageKey) {
         // 只有在「从设置以外的页面进来」时才回到顶部——用户明确要求的是
         // 「退出设置再进入要从头开始」，而不是「每次进出子页都被拽回去」。

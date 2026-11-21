@@ -15,17 +15,16 @@ fun conciseNotes(raw: String, limit: Int = Int.MAX_VALUE): List<String> =
         .map { it.trim() }
         .map(::stripMarkdown)
         .filter { it.isNotEmpty() }
-        .filterNot { line -> NOISE_KEYWORDS.any { line.contains(it) } }
+        // 发布信息（包名 / 校验值 / 下载地址…）与内置日志共用一份规则，
+        // 不再各维护一份词表 —— 否则同一条文案会在两处表现不一致。
+        .filterNot(::isNoiseEntry)
+        // 纯 Markdown 结构行（标题、引用、表格、图片、分隔线）不当作条目。
         .filterNot { line ->
             line.startsWith("#") ||
                 line.startsWith(">") ||
                 line.startsWith("|") ||
                 line.startsWith("![") ||
-                line.startsWith("---") ||
-                line.startsWith("大小：") ||
-                line.startsWith("大小:") ||
-                line.startsWith("支持系统") ||
-                line.startsWith("certutil")
+                line.startsWith("---")
         }
         // 发布说明首行是「日期 · 版本号」，和对话框自带的标题重复，直接丢掉。
         .filterNot { HEADING_LINE.matches(it) || DATE_ONLY.matches(it) }
@@ -52,15 +51,6 @@ private fun stripMarkdown(line: String): String = line
     .replace("**", "")
     .replace("`", "")
     .trim()
-
-/**
- * 发布信息类关键词：这些内容不属于功能介绍或问题修复，展示出来只会干扰阅读。
- * 只收「一定不是功能描述」的词，避免误伤正常条目（例如「安装包体积减小」）。
- */
-private val NOISE_KEYWORDS = listOf(
-    "包名：", "包名:", "versionCode", "versionName", "SHA-256", "SHA256", "MD5",
-    "校验值", "下载地址", "安装说明", "适用系统", "系统要求"
-)
 
 /** `2026/11/13 · 1.0.0` / `2026-11-13 1.0.0` 这类标题行。 */
 private val HEADING_LINE = Regex("""^\d{4}[/-]\d{1,2}[/-]\d{1,2}\s*[·\-—]?\s*v?\d+(?:\.\d+)*$""")

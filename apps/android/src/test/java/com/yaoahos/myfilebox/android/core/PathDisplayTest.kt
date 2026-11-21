@@ -1,23 +1,24 @@
 package com.yaoahos.myfilebox.android.core
 
+import com.yaoahos.myfilebox.core.STORAGE_ROOT_LABEL
 import com.yaoahos.myfilebox.core.displayLeaf
 import com.yaoahos.myfilebox.core.displayParent
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
-/** 路径末段显示名：内部存储根目录不能再露出末段「0」。 */
+/** 路径末段显示名：内部存储根目录不能再露出末段「0」，且全应用只用一个名字。 */
 class PathDisplayTest {
     private val root = "/storage/emulated/0"
 
     @Test
     fun `根目录与带尾斜杠的根目录都归一`() {
-        assertEquals("根目录", displayLeaf(root, root))
-        assertEquals("根目录", displayLeaf("$root/", root))
+        assertEquals(STORAGE_ROOT_LABEL, displayLeaf(root, root))
+        assertEquals(STORAGE_ROOT_LABEL, displayLeaf("$root/", root))
     }
 
     @Test
     fun `末段恰好是0的历史路径也归一`() {
-        assertEquals("根目录", displayLeaf("0", root))
+        assertEquals(STORAGE_ROOT_LABEL, displayLeaf("0", root))
     }
 
     @Test
@@ -32,7 +33,7 @@ class PathDisplayTest {
 
     @Test
     fun `父目录是根目录时归一`() {
-        assertEquals("根目录", displayParent("$root/photo.jpg", root))
+        assertEquals(STORAGE_ROOT_LABEL, displayParent("$root/photo.jpg", root))
     }
 
     @Test
@@ -43,5 +44,16 @@ class PathDisplayTest {
     @Test
     fun `远端路径按自身层级取父目录名`() {
         assertEquals("sub", displayParent("/remote/sub/a.txt", root))
+    }
+
+    /**
+     * 全应用只有这一个叫法，不允许再出现「根目录」。
+     * 以后谁改回字面量，这条会先红。
+     */
+    @Test
+    fun `根目录统一叫内部存储`() {
+        assertEquals("内部存储", STORAGE_ROOT_LABEL)
+        assertEquals("内部存储", displayLeaf(root, root))
+        assertEquals("内部存储", displayParent("$root/a.txt", root))
     }
 }

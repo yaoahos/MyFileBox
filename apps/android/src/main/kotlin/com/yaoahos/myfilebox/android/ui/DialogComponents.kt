@@ -1,5 +1,6 @@
 package com.yaoahos.myfilebox.android.ui
 
+import com.yaoahos.myfilebox.core.MODULE_LABEL_LOCAL
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
@@ -141,65 +142,62 @@ fun CompressDialog(
     var name by remember { mutableStateOf(defaultName) }
     var format by remember { mutableStateOf("zip") }
     var password by remember { mutableStateOf("") }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("压缩", fontWeight = FontWeight.Bold) },
-        text = {
-            Column(Modifier.imePadding()) {
-                OutlinedTextField(
-                    value = name,
-                    onValueChange = { name = it },
-                    label = { Text("压缩包名称") },
-                    singleLine = true,
-                    shape = RoundedCornerShape(12.dp),
-                    colors = dialogFieldColors(),
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Text("格式", fontSize = 12.sp, color = MutedText, modifier = Modifier.padding(top = 12.dp, bottom = 2.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf("zip" to "ZIP", "7z" to "7Z").forEach { (value, label) ->
-                        val active = format == value
-                        Row(
-                            Modifier
-                                .weight(1f)
-                                .height(42.dp)
-                                .clickable { format = value },
-                            horizontalArrangement = Arrangement.Center,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                label,
-                                fontSize = 12.sp,
-                                fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
-                                color = if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
-                            )
-                            if (active) {
-                                Icon(
-                                    Icons.Outlined.Check,
-                                    null,
-                                    tint = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.padding(start = 4.dp).size(15.dp)
-                                )
-                            }
-                        }
-                    }
-                }
-                PasswordField(
-                    value = password,
-                    onValueChange = { password = it },
-                    label = "压缩密码（可选）",
-                    supportingText = "留空则不加密；ZIP 用 AES-256，7Z 用原生加密",
-                    modifier = Modifier.fillMaxWidth()
-                )
-            }
-        },
+    // 高度与滚动交给 FormDialog：窗口已随键盘缩小，再叠 imePadding 会把键盘高度算两遍。
+    FormDialog(
+        title = "压缩",
+        onDismiss = onDismiss,
         confirmButton = {
             TextButton(onClick = {
                 onConfirm(name.trim().ifBlank { defaultName }, format, password)
             }) { Text("开始压缩") }
-        },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
-    )
+        }
+    ) {
+        OutlinedTextField(
+            value = name,
+            onValueChange = { name = it },
+            label = { Text("压缩包名称") },
+            singleLine = true,
+            shape = RoundedCornerShape(12.dp),
+            colors = dialogFieldColors(),
+            modifier = Modifier.fillMaxWidth()
+        )
+        Text("格式", fontSize = 12.sp, color = MutedText, modifier = Modifier.padding(top = 12.dp, bottom = 2.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            listOf("zip" to "ZIP", "7z" to "7Z").forEach { (value, label) ->
+                val active = format == value
+                Row(
+                    Modifier
+                        .weight(1f)
+                        .height(42.dp)
+                        .clickable { format = value },
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        label,
+                        fontSize = 12.sp,
+                        fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
+                        color = if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                    )
+                    if (active) {
+                        Icon(
+                            Icons.Outlined.Check,
+                            null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.padding(start = 4.dp).size(15.dp)
+                        )
+                    }
+                }
+            }
+        }
+        PasswordField(
+            value = password,
+            onValueChange = { password = it },
+            label = "压缩密码（可选）",
+            supportingText = "留空则不加密；ZIP 用 AES-256，7Z 用原生加密",
+            modifier = Modifier.fillMaxWidth()
+        )
+    }
 }
 
 /**
@@ -219,7 +217,7 @@ fun ExtractDialog(
         onDismissRequest = onDismiss,
         title = { Text("解压", fontWeight = FontWeight.Bold) },
         text = {
-            Column(Modifier.imePadding()) {
+            Column {
                 Row(
                     Modifier.fillMaxWidth().clickable { pickMode = "here" }.padding(vertical = 4.dp),
                     verticalAlignment = Alignment.CenterVertically
@@ -237,7 +235,7 @@ fun ExtractDialog(
                 if (pickMode == "pick") {
                     // 面包屑（清单 12/19）：点哪层回哪层；无「上一级」。
                     val segments = buildList {
-                        add("根目录" to rootPath.trimEnd('/'))
+                        add(MODULE_LABEL_LOCAL to rootPath.trimEnd('/'))
                         val rel = pickPath.trimEnd('/').removePrefix(rootPath.trimEnd('/')).trim('/')
                         if (rel.isNotBlank()) {
                             var acc = rootPath.trimEnd('/')
@@ -260,13 +258,14 @@ fun ExtractDialog(
                     LaunchedEffect(pickPath) {
                         subfolders = withContext(Dispatchers.IO) { listSubfolders(pickPath) }
                     }
-                    Column(
+                    // 同上：目录里子文件夹可能有几百个，Column + forEach 会一次全组合。
+                    // 换成定高 LazyColumn，只组合看得见的几行。
+                    LazyColumn(
                         Modifier
                             .fillMaxWidth()
                             .heightIn(max = 220.dp)
-                            .verticalScroll(rememberScrollState())
                     ) {
-                        subfolders.forEach { (path, name) ->
+                        items(subfolders) { (path, name) ->
                             Row(
                                 Modifier.fillMaxWidth().clickable { pickPath = path }.padding(vertical = 7.dp),
                                 verticalAlignment = Alignment.CenterVertically
@@ -360,27 +359,23 @@ fun ExtractPasswordDialog(
     onDismiss: () -> Unit
 ) {
     var password by remember(prompt) { mutableStateOf("") }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("需要密码", fontWeight = FontWeight.Bold) },
-        text = {
-            Column {
-                Text("「${prompt.archiveName}」已加密，请输入解压密码。", fontSize = 12.sp, lineHeight = 18.sp)
-                if (prompt.message != DEFAULT_EXTRACT_PASSWORD_MESSAGE) {
-                    Text(prompt.message, fontSize = 12.sp, color = MaterialTheme.colorScheme.error)
-                }
-                Spacer(Modifier.height(8.dp))
-                PasswordField(
-                    value = password,
-                    onValueChange = { password = it },
-                    label = "解压密码",
-                    modifier = Modifier.fillMaxWidth()
-                )
-            }
-        },
-        confirmButton = { TextButton(onClick = { onConfirm(password) }) { Text("解压") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
-    )
+    FormDialog(
+        title = "需要密码",
+        onDismiss = onDismiss,
+        spacing = 8.dp,
+        confirmButton = { TextButton(onClick = { onConfirm(password) }) { Text("解压") } }
+    ) {
+        Text("「${prompt.archiveName}」已加密，请输入解压密码。", fontSize = 12.sp, lineHeight = 18.sp)
+        if (prompt.message != DEFAULT_EXTRACT_PASSWORD_MESSAGE) {
+            Text(prompt.message, fontSize = 12.sp, color = MaterialTheme.colorScheme.error)
+        }
+        PasswordField(
+            value = password,
+            onValueChange = { password = it },
+            label = "解压密码",
+            modifier = Modifier.fillMaxWidth()
+        )
+    }
 }
 
 private const val DEFAULT_EXTRACT_PASSWORD_MESSAGE = "该压缩包已加密，请输入密码"
@@ -420,30 +415,27 @@ fun RenameDialog(
     onDismiss: () -> Unit
 ) {
     var name by remember(currentName) { mutableStateOf(currentName) }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("重命名", fontWeight = FontWeight.Bold) },
-        text = {
-            Column(Modifier.imePadding()) {
-                OutlinedTextField(
-                    value = name,
-                    onValueChange = { name = it },
-                    label = { Text("新名称") },
-                    singleLine = true,
-                    shape = RoundedCornerShape(12.dp),
-                    colors = dialogFieldColors(),
-                    modifier = Modifier.fillMaxWidth()
-                )
-            }
-        },
+    // 高度与滚动交给 FormDialog：窗口已随键盘缩小，再叠 imePadding 会把键盘高度算两遍。
+    FormDialog(
+        title = "重命名",
+        onDismiss = onDismiss,
         confirmButton = {
             TextButton(
                 enabled = name.isNotBlank() && name != currentName,
                 onClick = { onConfirm(name.trim()) }
             ) { Text("保存") }
-        },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
-    )
+        }
+    ) {
+        OutlinedTextField(
+            value = name,
+            onValueChange = { name = it },
+            label = { Text("新名称") },
+            singleLine = true,
+            shape = RoundedCornerShape(12.dp),
+            colors = dialogFieldColors(),
+            modifier = Modifier.fillMaxWidth()
+        )
+    }
 }
 
 /**
@@ -463,41 +455,37 @@ fun ShareLinkDialog(
         10080 to "7 天",
         43200 to "30 天"
     )
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("共享设置", fontWeight = FontWeight.Bold) },
-        text = {
-            Column(Modifier.imePadding().verticalScroll(rememberScrollState())) {
-                Text("有效期", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = MutedText)
-                Row(
-                    Modifier.fillMaxWidth().padding(top = 6.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    expiryOptions.forEach { (minutes, label) ->
-                        FilterChip(
-                            selected = expireChoice == minutes,
-                            onClick = { expireChoice = minutes },
-                            label = { Text(label, fontSize = 12.sp) }
-                        )
-                    }
-                }
-                PasswordField(
-                    value = password,
-                    onValueChange = { password = it },
-                    label = "访问密码（可选）",
-                    supportingText = "留空表示不设密码；设置后访客需输入密码才能打开链接。",
-                    modifier = Modifier.fillMaxWidth().padding(top = 10.dp)
-                )
-            }
-        },
+    FormDialog(
+        title = "共享设置",
+        onDismiss = onDismiss,
         confirmButton = {
             Button(
                 onClick = { onConfirm(password.trim(), expireChoice) },
                 shape = RoundedCornerShape(12.dp)
             ) { Text("生成并复制链接") }
-        },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
-    )
+        }
+    ) {
+        Text("有效期", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = MutedText)
+        Row(
+            Modifier.fillMaxWidth().padding(top = 6.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            expiryOptions.forEach { (minutes, label) ->
+                FilterChip(
+                    selected = expireChoice == minutes,
+                    onClick = { expireChoice = minutes },
+                    label = { Text(label, fontSize = 12.sp) }
+                )
+            }
+        }
+        PasswordField(
+            value = password,
+            onValueChange = { password = it },
+            label = "访问密码（可选）",
+            supportingText = "留空表示不设密码；设置后访客需输入密码才能打开链接。",
+            modifier = Modifier.fillMaxWidth().padding(top = 10.dp)
+        )
+    }
 }
 
 /** 文件树选择器的两种模式：只选文件夹（上传文件夹 / 下载位置）、选文件（上传文件）。 */
@@ -559,7 +547,7 @@ fun LocalTreePickerDialog(
         loading = false
     }
     val segments = buildList {
-        add("内部存储" to root)
+        add(MODULE_LABEL_LOCAL to root)
         val rel = path.removePrefix(root).trim('/')
         if (rel.isNotBlank()) {
             var acc = root

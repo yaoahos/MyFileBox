@@ -1,5 +1,6 @@
 package com.yaoahos.myfilebox.android.ui
 
+import com.yaoahos.myfilebox.core.MODULE_LABEL_LOCAL
 import com.yaoahos.myfilebox.core.displayLeaf
 
 import androidx.compose.foundation.background
@@ -136,18 +137,11 @@ fun SearchScreen(state: MyFileBoxState, vm: AppViewModel) {
             Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Surface(shape = CircleShape, color = MaterialTheme.colorScheme.surface, modifier = Modifier.size(36.dp)) {
-                IconButton(
-                    onClick = { if (selecting) vm.clearSearchSelection() else vm.closeSearch() },
-                    modifier = Modifier.size(36.dp)
-                ) {
-                    Icon(
-                        if (selecting) Icons.Outlined.Close else Icons.Outlined.ArrowBack,
-                        if (selecting) "退出选择" else "返回",
-                        modifier = Modifier.size(18.dp)
-                    )
-                }
-            }
+            CircleBackButton(
+                onClick = { if (selecting) vm.clearSearchSelection() else vm.closeSearch() },
+                label = if (selecting) "退出选择" else "返回",
+                icon = if (selecting) Icons.Outlined.Close else Icons.Outlined.ArrowBack
+            )
             if (selecting) {
                 // 选择态：顶栏换成标题 + 全选，搜索框先让位（继续输入没有意义）。
                 Column(Modifier.weight(1f).padding(start = 11.dp)) {
@@ -418,7 +412,9 @@ fun SearchScreen(state: MyFileBoxState, vm: AppViewModel) {
                 Column(Modifier.fillMaxWidth()) {
                     // 面包屑（清单 12/19）：点哪层回哪层；无「上一级」。
                     val crumbs = buildList {
-                        add(null to "根目录")
+                        // 第一层是模块名，不是「内部存储」：存储根只是本模块的根目录，
+                        // 单独占一层会让面包屑和浏览页对不上。
+                        add(null to MODULE_LABEL_LOCAL)
                         pickerStack.forEach { add(it to it.label) }
                         current?.let { add(it to it.label) }
                     }
@@ -533,24 +529,10 @@ fun SearchScreen(state: MyFileBoxState, vm: AppViewModel) {
     }
 
     if (extDialog) {
-        AlertDialog(
-            onDismissRequest = { extDialog = false },
-            title = { Text("按后缀筛选", fontWeight = FontWeight.Bold) },
-            text = {
-                Column(Modifier.imePadding()) {
-                    Text("输入文件后缀，例如 jpg, png 或 .pdf。", fontSize = 12.sp, color = MutedText)
-                    OutlinedTextField(
-                        value = extText,
-                        onValueChange = { extText = it },
-                        label = { Text("文件后缀") },
-                        singleLine = true,
-                        shape = RoundedCornerShape(12.dp),
-                        colors = dialogFieldColors(),
-                        modifier = Modifier.padding(top = 8.dp)
-                    )
-                    Text("支持逗号或空格分隔多个后缀；留空表示不限。", fontSize = 12.sp, color = MutedText, modifier = Modifier.padding(top = 6.dp))
-                }
-            },
+        FormDialog(
+            title = "按后缀筛选",
+            onDismiss = { extDialog = false },
+            spacing = 6.dp,
             confirmButton = {
                 Button(
                     onClick = { vm.setSearchExt(extText); extDialog = false },
@@ -560,7 +542,19 @@ fun SearchScreen(state: MyFileBoxState, vm: AppViewModel) {
             dismissButton = {
                 TextButton(onClick = { vm.setSearchExt(""); extDialog = false }) { Text("清除") }
             }
-        )
+        ) {
+            Text("输入文件后缀，例如 jpg, png 或 .pdf。", fontSize = 12.sp, color = MutedText)
+            OutlinedTextField(
+                value = extText,
+                onValueChange = { extText = it },
+                label = { Text("文件后缀") },
+                singleLine = true,
+                shape = RoundedCornerShape(12.dp),
+                colors = dialogFieldColors(),
+                modifier = Modifier.fillMaxWidth()
+            )
+            Text("支持逗号或空格分隔多个后缀；留空表示不限。", fontSize = 12.sp, color = MutedText)
+        }
     }
 }
 

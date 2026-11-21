@@ -534,40 +534,40 @@ private fun AddNetworkDialog(
     var testResult by remember(initial) { mutableStateOf<String?>(null) }
     // 保存失败时的行内提示：对话框是独立窗口，页面顶部的浮层会被它挡住。
     var formError by remember(initial) { mutableStateOf<String?>(null) }
-    // 键盘弹出时对话框只剩半屏：表单区交给 weight + verticalScroll 自适应，
-    // 有键盘就自动变矮并滚动，没键盘就按内容高度展开。
-    // 整个弹窗也要有高度上限：之前只钳了表单区，标题 + 按钮行 + 提示行照样能把
-    // 对话框顶出屏幕，长一点的报错直接被屏幕边缘裁掉。
-    val screenHeight = androidx.compose.ui.platform.LocalConfiguration.current.screenHeightDp.dp
-    val maxDialogHeight = (screenHeight * 0.92f).coerceAtLeast(260.dp)
-    Dialog(onDismissRequest = onDismiss) {
-        Surface(
-            shape = RoundedCornerShape(24.dp),
-            // 底色跟「新建文件夹」「筛选」这些 AlertDialog 一致（surfaceContainerHigh），
-            // 且不随主题色变化。旧实现用 surface + tonalElevation = 8dp：
-            // Material3 会按高度把 surfaceTint（= 主题色）混进底色，红色主题下这张
-            // 对话框就整体泛红，和别的输入界面明显不是一套。层级改由阴影表达。
-            color = MaterialTheme.colorScheme.surfaceContainerHigh,
-            shadowElevation = 12.dp,
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 18.dp)
-                .heightIn(max = maxDialogHeight)
-        ) {
-        Column(Modifier.padding(horizontal = 20.dp, vertical = 18.dp).imePadding()) {
-            Text(
-                if (initial == null) "添加网络位置" else "编辑网络连接",
-                fontWeight = FontWeight.Bold,
-                fontSize = 19.sp
-            )
-            Column(
-                Modifier
-                    // weight(fill = false)：内容不多时按内容高度，内容过多时才占满剩余空间并滚动。
-                    .weight(1f, fill = false)
-                    .verticalScroll(rememberScrollState())
-                    .padding(top = 12.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
+    // 交给统一外壳：竖屏是 AlertDialog（与重命名、压缩这些表单同一套外观），
+    // 横屏 / 分屏自动换成底部面板并随键盘上移。
+    //
+    // 为什么不自己留一套 Dialog：Dialog 是独立窗口，横屏时既不跟着键盘 resize，
+    // 也拿不到 ime insets，键盘一弹就把整块输入区盖住（实测可用高度只剩 120dp 上下，
+    // 四个按钮排一行就吃光了）。ModalBottomSheet 长在主窗口里，imePadding 直接生效。
+    // 于是按钮也跟着重排：取消 / 保存留在标题行随时可点，测试 / 删除挪进内容区，
+    // 谁都不会被键盘或手势条吃掉。
+    val saveInteraction = remember { MutableInteractionSource() }
+    FormDialog(
+        title = if (initial == null) "添加网络位置" else "编辑网络连接",
+        onDismiss = onDismiss,
+        spacing = 8.dp,
+        confirmButton = {
+            Button(
+                onClick = {
+                    formError = null
+                    val ok = onSave(initial?.id, name, protocol, host, port, path, username, password, secure)
+                    if (!ok) {
+                        // 文字已经复制到对话框内的行内提示，把页面浮层那条消费掉，
+                        // 否则同一句话会在屏幕上出现两次。
+                        formError = vm.state.message ?: "保存失败，请检查填写内容"
+                        vm.consumeMessage()
+                    }
+                },
+                interactionSource = saveInteraction,
+                modifier = Modifier.height(48.dp).pressScale(saveInteraction),
+                shape = RoundedCornerShape(12.dp),
+                contentPadding = PaddingValues(horizontal = 4.dp)
             ) {
+                Text("保存", fontSize = 13.5.sp, maxLines = 1, softWrap = false)
+            }
+        }
+    ) {
                 if (formError != null) {
                     InlineNotice(formError.orEmpty(), MaterialTheme.colorScheme.error)
                 }
@@ -690,17 +690,11 @@ private fun AddNetworkDialog(
                         Switch(checked = secure, onCheckedChange = { secure = it })
                     }
                 }
-            }
-            // 固定按钮区：测试 / 删除 / 取消 / 保存 同一行、等宽、同高。
-            // 文案压到两个字（原「测试连接」「保存并连接」「保存修改」），四个按钮才排得开
-            // 又不会被裁字；主操作实心、危险操作红色描边、其余弱化描边，一眼能分主次。
-            HorizontalDivider(
-                Modifier.padding(top = 14.dp),
-                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
-            )
+            // 测试 / 删除挪进内容区（原来是四个按钮排一行）。
+            // 横屏弹出键盘后标题行只有「取消 / 保存」两个，才不会被挤成一条缝；
+            // 这两个都是有实际动作但不该抢主操作位置的，各占半行即可。
             Row(
-                Modifier.fillMaxWidth().padding(top = 12.dp),
-                verticalAlignment = Alignment.CenterVertically,
+                Modifier.fillMaxWidth().padding(top = 4.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 DialogOutlineAction(
@@ -720,35 +714,11 @@ private fun AddNetworkDialog(
                 )
                 if (onDelete != null) {
                     DialogOutlineAction(
-                        text = "删除",
+                        text = "删除连接",
                         tone = DialogActionTone.DANGER,
                         modifier = Modifier.weight(1f),
                         onClick = onDelete
                     )
-                }
-                DialogOutlineAction(
-                    text = "取消",
-                    modifier = Modifier.weight(1f),
-                    onClick = onDismiss
-                )
-                val saveInteraction = remember { MutableInteractionSource() }
-                Button(
-                    onClick = {
-                        formError = null
-                        val ok = onSave(initial?.id, name, protocol, host, port, path, username, password, secure)
-                        if (!ok) {
-                            // 文字已经复制到对话框内的行内提示，把页面浮层那条消费掉，
-                            // 否则同一句话会在屏幕上出现两次。
-                            formError = vm.state.message ?: "保存失败，请检查填写内容"
-                            vm.consumeMessage()
-                        }
-                    },
-                    interactionSource = saveInteraction,
-                    modifier = Modifier.weight(1f).height(48.dp).pressScale(saveInteraction),
-                    shape = RoundedCornerShape(12.dp),
-                    contentPadding = PaddingValues(horizontal = 4.dp)
-                ) {
-                    Text("保存", fontSize = 13.5.sp, maxLines = 1, softWrap = false)
                 }
             }
             // 测试结果：高度按内容走（上限约 5 行，超出可滚动），不再固定 40dp 把长报错裁掉。
@@ -780,8 +750,6 @@ private fun AddNetworkDialog(
                     )
                 }
             }
-        }
-        }
     }
 }
 

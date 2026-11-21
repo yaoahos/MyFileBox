@@ -1191,7 +1191,10 @@ class DsmRepository {
         if (session.synoToken.isNotBlank()) request.addHeader("X-SYNO-TOKEN", session.synoToken)
         client.newCall(request.build()).execute().use { response ->
             val json = asJson(response.body?.string().orEmpty())
-            if (!json.optBoolean("success")) throw IllegalStateException(dsmError(json))
+            if (!json.optBoolean("success")) {
+                // 带上错误码：调用方要按语义区分 800（已收藏）这类「其实是成功」的情况。
+                throw DsmApiException(dsmErrorCode(json), dsmError(json))
+            }
             json
         }
     }
@@ -1235,8 +1238,43 @@ class DsmRepository {
     suspend fun supportsFavorite(session: Session): Boolean = favoriteApiVersion(session) > 0
 
     /**
+     * 读取群晖自己的收藏列表（SYNO.FileStation.Favorite list）。
+     *
+     * 本机记录只能代表「在这台设备上点过收藏」，DSM 网页端或另一台设备加进来的
+     * 收藏它并不知道。状态一旦不同步，用户对已收藏的文件夹再点收藏就会撞 800
+     * （「该路径已在收藏里」）并显示成失败。所以要有一处真实来源。
+     *
+     * @return 收藏路径集合；null 表示这次没读成（接口不支持 / 网络问题），调用方保持原状。
+     */
+    suspend fun listFavoritePaths(session: Session): Set<String>? = withContext(Dispatchers.IO) {
+        val version = favoriteApiVersion(session)
+        if (version <= 0) return@withContext null
+        val json = runCatching {
+            api(
+                session, "SYNO.FileStation.Favorite", version.toString(), "list",
+                FormBody.Builder().add("offset", "0").add("limit", "1000")
+            )
+        }.getOrNull() ?: return@withContext null
+        val arr = json.optJSONObject("data")?.optJSONArray("favorites") ?: return@withContext emptySet()
+        val out = mutableSetOf<String>()
+        for (i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i) ?: continue
+            // broken 是原路径已不存在的失效收藏，不要拿它去点亮界面。
+            if (o.optString("status") == "broken") continue
+            val path = o.optString("path").trimEnd('/')
+            if (path.isNotEmpty()) out.add(path)
+        }
+        out
+    }
+
+    /**
      * 调用官方收藏接口添加 / 移除。
      * 官方文档：path 是「带引号的单个 JSON 字符串」，add 还要 name，且只支持文件夹。
+     *
+     * 错误码按语义处理，而不是一律当失败：
+     *   800 = 该路径已在收藏里 → 用户要的结果已经达成，算成功；
+     *   801 = 收藏名与另一条收藏重名 → 换一个名字重试一次；
+     *   取消收藏本身是幂等的 → 群晖那边本来没有也算成功。
      */
     suspend fun setFavorite(session: Session, paths: List<String>, on: Boolean): Boolean =
         withContext(Dispatchers.IO) {
@@ -1247,17 +1285,44 @@ class DsmRepository {
                 return@withContext false
             }
             val v = version.toString()
-            runCatching {
-                paths.forEach { path ->
-                    val body = FormBody.Builder().add("path", JSONObject.quote(path))
-                    if (on) body.add("name", JSONObject.quote(path.trimEnd('/').substringAfterLast('/')))
-                    api(session, "SYNO.FileStation.Favorite", v, if (on) "add" else "delete", body)
-                }
-                true
-            }.getOrElse {
-                lastError = "收藏操作失败：${friendlyNetError(it)}"
-                false
+
+            suspend fun attempt(path: String, name: String): Int = try {
+                val body = FormBody.Builder().add("path", JSONObject.quote(path))
+                if (on) body.add("name", JSONObject.quote(name))
+                api(session, "SYNO.FileStation.Favorite", v, if (on) "add" else "delete", body)
+                0
+            } catch (e: DsmApiException) {
+                e.code
+            } catch (e: Exception) {
+                // 网络层异常：不带 DSM 错误码，交给下面的统一文案。
+                -1
             }
+
+            var failure: String? = null
+            paths.forEach { path ->
+                val base = path.trimEnd('/').substringAfterLast('/')
+                var code = attempt(path, base)
+                when {
+                    code == 0 -> Unit
+                    // 已经在收藏里：这正是用户想要的，不算错。
+                    on && code == 800 -> Unit
+                    // 收藏名与别的路径重名：带序号再试一次。
+                    on && code == 801 -> {
+                        val again = attempt(path, "$base (2)")
+                        if (again != 0 && again != 800) {
+                            failure = failure ?: "群晖收藏名冲突，请改名后重试"
+                        }
+                    }
+                    // 取消收藏幂等：DSM 对「本来就不在收藏里」回 800，按成功处理。
+                    // 其余错误码（缺参数 / 接口不存在等）必须当失败，否则本地先删了、
+                    // 下次刷新又从服务器读回来，星标反复「取消又复活」。
+                    !on && code == 800 -> Unit
+                    code == -1 -> failure = failure ?: "收藏操作失败：网络不稳定，请稍后重试"
+                    else -> failure = failure ?: "群晖收藏失败（错误码 $code）"
+                }
+            }
+            if (failure != null) lastError = failure!!
+            failure == null
         }
 
     private fun asJson(text: String): JSONObject {
@@ -1276,8 +1341,11 @@ class DsmRepository {
         return "${if (session.https) "https" else "http"}://$raw"
     }
 
+    private fun dsmErrorCode(json: JSONObject): Int =
+        json.optJSONObject("error")?.optInt("code", -1) ?: -1
+
     private fun dsmError(json: JSONObject): String {
-        val code = json.optJSONObject("error")?.optInt("code", -1) ?: -1
+        val code = dsmErrorCode(json)
         lastErrorCode = code
         return when (code) {
             // SYNO.API.Auth 登录专用码
@@ -1306,6 +1374,10 @@ class DsmRepository {
             116 -> "该站点不允许此操作"
             119 -> "会话无效（_sid 未被识别）"
             150 -> "请求来源 IP 与登录 IP 不一致"
+            // SYNO.FileStation.Favorite 专用码
+            800 -> "该文件夹已在群晖收藏里"
+            801 -> "收藏名与另一条收藏重名"
+            802 -> "群晖收藏数量已达上限"
             1001 -> "接口不存在，可能不是群晖 DSM"
             -1 -> "群晖返回了未知错误"
             else -> "群晖错误码 $code"
@@ -1314,6 +1386,15 @@ class DsmRepository {
 
     private fun encode(value: String): String = java.net.URLEncoder.encode(value, "UTF-8")
 }
+
+/**
+ * DSM 接口返回 success:false 时抛出，带上官方错误码。
+ *
+ * 继承 IllegalStateException 是为了不改变既有 catch 的行为；需要区分错误码语义的地方
+ * （例如收藏接口的 800「已存在」）再按 code 处理。
+ */
+class DsmApiException(val code: Int, message: String) : IllegalStateException(message)
+
 
 data class DsmLoginResult(
     val success: Boolean,

@@ -1348,6 +1348,14 @@ class LocalRepository(private val context: Context) {
             override fun initialValue() = HashMap<String, SimpleDateFormat>(4)
         }
 
+        /**
+         * 按自定义格式输出时间，走同一套线程内缓存。
+         *
+         * 列表 / 卡片里现算时间的地方不少，每一次都 `SimpleDateFormat(pattern, locale)`
+         * 都要重新读本地化数据。统一走这里之后，同一种格式只构造一次。
+         */
+        fun formatWith(pattern: String, ms: Long): String = formatted(pattern, ms)
+
         private fun formatted(pattern: String, ms: Long): String {
             // SimpleDateFormat 构造时会把默认时区/语言固化下来，用户改了系统时区或语言后，
             // 旧实例仍按老口径格式化（跨零点时直接差一天）。缓存键带上这两项，

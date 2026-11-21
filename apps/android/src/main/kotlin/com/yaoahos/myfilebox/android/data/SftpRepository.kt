@@ -184,24 +184,65 @@ class SftpRepository(private val knownHostsFile: File? = null) {
             paths.forEach { path ->
                 val ok = runCatching {
                     val name = path.trimEnd('/').substringAfterLast('/')
-                    val attrs = channel.stat(path)
-                    if (!attrs.isDir) {
-                        val tmp = File.createTempFile("myfilebox-sftp-", ".tmp")
-                        try {
-                            channel.get(path).use { input -> tmp.outputStream().use { input.copyTo(it) } }
-                            tmp.inputStream().use { input -> channel.put(input, "$destDir/$name") }
-                            if (move) channel.rm(path)
-                        } finally {
-                            tmp.delete()
-                        }
+                    val target = "${destDir.trimEnd('/')}/$name"
+                    // 移动优先走服务端 rename：目录也支持，也不用先在目标端落一份副本。
+                    // 失败（跨挂载点 / 服务端不允许）再退回「递归复制 + 删源」。
+                    if (move && runCatching { channel.rename(path, target) }.isSuccess) {
+                        true
+                    } else {
+                        copyTree(channel, path, target)
+                        if (move) removeTree(channel, path)
+                        true
                     }
-                    true
                 }.getOrDefault(false)
                 if (!ok) allDone = false
             }
             allDone
         }
     }.getOrDefault(false)
+
+    /**
+     * 递归复制一个文件或整个目录。
+     *
+     * 这里原来只有 `if (!attrs.isDir)` 一个分支：复制 / 移动文件夹时整项被静默跳过，
+     * 却仍返回 true——界面上提示「移动成功」，实际源和目标都还在，一个文件都没动。
+     */
+    private fun copyTree(channel: ChannelSftp, source: String, target: String) {
+        val attrs = channel.stat(source)
+        if (!attrs.isDir) {
+            // 同一个 channel 上不能同时开 get / put 两条流，先落临时文件再上传。
+            val tmp = File.createTempFile("myfilebox-sftp-", ".tmp")
+            try {
+                channel.get(source).use { input -> tmp.outputStream().use { input.copyTo(it) } }
+                tmp.inputStream().use { input -> channel.put(input, target) }
+            } finally {
+                tmp.delete()
+            }
+            return
+        }
+        // 目标目录可能已存在（覆盖粘贴），mkdir 失败不当错误；随后的 put 会暴露真实问题。
+        runCatching { channel.stat(target) }.getOrNull() ?: runCatching { channel.mkdir(target) }
+        for (entry in channel.ls(source)) {
+            val name = entry.filename
+            if (name == "." || name == "..") continue
+            copyTree(channel, "$source/$name", "$target/$name")
+        }
+    }
+
+    /** 递归删除（仅当 rename 不可用、需要「复制后再删源」时走这里）。 */
+    private fun removeTree(channel: ChannelSftp, path: String) {
+        val attrs = channel.stat(path)
+        if (!attrs.isDir) {
+            channel.rm(path)
+            return
+        }
+        for (entry in channel.ls(path)) {
+            val name = entry.filename
+            if (name == "." || name == "..") continue
+            removeTree(channel, "$path/$name")
+        }
+        channel.rmdir(path)
+    }
 
     /** 首次连接后记住主机密钥，下次起 StrictHostKeyChecking=yes 严格校验。 */
     private fun rememberHostKey(session: Session?, connection: NetworkConnection, known: File?) {

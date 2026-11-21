@@ -17,7 +17,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -81,6 +80,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import androidx.compose.ui.platform.LocalConfiguration
 
 /**
  * 备份与同步。
@@ -487,43 +487,42 @@ private fun PasswordDialog(
             second = ""
         }
     }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(title, fontWeight = FontWeight.Bold) },
-        text = {
-            Column(Modifier.imePadding(), verticalArrangement = Arrangement.spacedBy(9.dp)) {
-                PasswordField(first, { first = it }, label = "配置密码", modifier = Modifier.fillMaxWidth())
-                if (confirmTwice) {
-                    PasswordField(
-                        second,
-                        { second = it },
-                        label = "再输入一次",
-                        isError = mismatch,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                }
-                error?.let { Text(it, fontSize = 12.sp, color = MaterialTheme.colorScheme.error, lineHeight = 16.sp) }
-                Text(hint, fontSize = 12.sp, color = MutedText, lineHeight = 16.sp)
-                if (mismatch) {
-                    Text("两次输入的密码不一致", fontSize = 12.sp, color = MaterialTheme.colorScheme.error)
-                }
-                if (busy) {
-                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 2.dp)) {
-                        CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
-                        Text(busyText, fontSize = 12.sp, color = MutedText, modifier = Modifier.padding(start = 8.dp))
-                    }
-                }
-            }
-        },
+    FormDialog(
+        title = title,
+        onDismiss = onDismiss,
+        spacing = 9.dp,
         confirmButton = {
             Button(
                 onClick = { onConfirm(first) },
                 enabled = !busy && first.length >= BackupCrypto.MIN_PASSWORD_LENGTH && (!confirmTwice || first == second),
                 shape = RoundedCornerShape(12.dp)
             ) { Text(confirmLabel) }
-        },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
-    )
+        }
+    ) {
+        // 高度与滚动由 FormDialog 统一处理：键盘把窗口压矮时内容自己滚动，
+        // 这里再加 ime 内边距会把键盘高度算第二遍、留一块空白。
+        PasswordField(first, { first = it }, label = "配置密码", modifier = Modifier.fillMaxWidth())
+        if (confirmTwice) {
+            PasswordField(
+                second,
+                { second = it },
+                label = "再输入一次",
+                isError = mismatch,
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
+        error?.let { Text(it, fontSize = 12.sp, color = MaterialTheme.colorScheme.error, lineHeight = 16.sp) }
+        Text(hint, fontSize = 12.sp, color = MutedText, lineHeight = 16.sp)
+        if (mismatch) {
+            Text("两次输入的密码不一致", fontSize = 12.sp, color = MaterialTheme.colorScheme.error)
+        }
+        if (busy) {
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 2.dp)) {
+                CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
+                Text(busyText, fontSize = 12.sp, color = MutedText, modifier = Modifier.padding(start = 8.dp))
+            }
+        }
+    }
 }
 
 @Composable
@@ -541,73 +540,74 @@ private fun SyncConfigDialog(
     var secure by remember { mutableStateOf(sync.secure) }
     var cipher by remember { mutableStateOf("") }
 
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("云同步设置", fontWeight = FontWeight.Bold) },
-        text = {
-            Column(
-                Modifier.imePadding().verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(9.dp)
-            ) {
-                OutlinedTextField(
-                    host, { host = it },
-                    label = { Text("服务器地址或域名") },
-                    singleLine = true, shape = RoundedCornerShape(12.dp),
-                    colors = dialogFieldColors(), modifier = Modifier.fillMaxWidth()
-                )
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedTextField(
-                        port, { port = it.filter { c -> c.isDigit() } },
-                        label = { Text("端口") },
-                        singleLine = true, shape = RoundedCornerShape(12.dp),
-                        colors = dialogFieldColors(),
-                        modifier = Modifier.weight(0.38f)
-                    )
-                    OutlinedTextField(
-                        path, { path = it },
-                        label = { Text("目录") },
-                        singleLine = true, shape = RoundedCornerShape(12.dp),
-                        colors = dialogFieldColors(),
-                        modifier = Modifier.weight(0.62f)
-                    )
-                }
-                OutlinedTextField(
-                    user, { user = it },
-                    label = { Text("账号") },
-                    singleLine = true, shape = RoundedCornerShape(12.dp),
-                    colors = dialogFieldColors(), modifier = Modifier.fillMaxWidth()
-                )
-                PasswordField(pass, { pass = it }, label = "密码（留空则不修改）")
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Switch(checked = secure, onCheckedChange = { secure = it })
-                    Text(
-                        "使用 HTTPS（自签名证书也可连接）",
-                        fontSize = 12.sp,
-                        modifier = Modifier.padding(start = 8.dp)
-                    )
-                }
-                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.4f))
-                PasswordField(
-                    cipher, { cipher = it },
-                    label = if (sync.hasCipher) "新配置密码（留空不修改）" else "配置密码（至少 8 位）"
-                )
-                Text(
-                    "用于加密备份文件，与 WebDAV 密码可以不同；忘记则云端备份无法恢复。",
-                    fontSize = 12.sp,
-                    color = MutedText,
-                    lineHeight = 16.sp
-                )
-            }
-        },
+    // 内容区自己限高并滚动。
+    //
+    // 这里有两层约束在打架：AlertDialog 的窗口在键盘弹出时会随 adjustResize 缩小，
+    // 但 M3 的 text 槽不会主动让内容变矮，字段一多就顶出可用区域、按钮被键盘盖住；
+    // 而再补一层 imePadding 又会把键盘高度重复算一遍，键盘上方留出一大块空白。
+    // 限高改成「屏高 - 键盘 - 标题按钮开销」后，横屏与竖屏键盘态都不会溢出；
+    // 屏高过低（横屏 + 键盘）时 FormDialog 自己切到紧凑形态，按钮始终可见。
+    FormDialog(
+        title = "云同步设置",
+        onDismiss = onDismiss,
+        spacing = 9.dp,
         confirmButton = {
             Button(
                 onClick = { onSave(host, port, path, user, pass, secure, cipher) },
                 enabled = host.isNotBlank() && (sync.hasCipher || cipher.length >= BackupCrypto.MIN_PASSWORD_LENGTH),
                 shape = RoundedCornerShape(12.dp)
             ) { Text("保存并开启") }
-        },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
-    )
+        }
+    ) {
+        OutlinedTextField(
+            host, { host = it },
+            label = { Text("服务器地址或域名") },
+            singleLine = true, shape = RoundedCornerShape(12.dp),
+            colors = dialogFieldColors(), modifier = Modifier.fillMaxWidth()
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedTextField(
+                port, { port = it.filter { c -> c.isDigit() } },
+                label = { Text("端口") },
+                singleLine = true, shape = RoundedCornerShape(12.dp),
+                colors = dialogFieldColors(),
+                modifier = Modifier.weight(0.38f)
+            )
+            OutlinedTextField(
+                path, { path = it },
+                label = { Text("目录") },
+                singleLine = true, shape = RoundedCornerShape(12.dp),
+                colors = dialogFieldColors(),
+                modifier = Modifier.weight(0.62f)
+            )
+        }
+        OutlinedTextField(
+            user, { user = it },
+            label = { Text("账号") },
+            singleLine = true, shape = RoundedCornerShape(12.dp),
+            colors = dialogFieldColors(), modifier = Modifier.fillMaxWidth()
+        )
+        PasswordField(pass, { pass = it }, label = "密码（留空则不修改）")
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Switch(checked = secure, onCheckedChange = { secure = it })
+            Text(
+                "使用 HTTPS（自签名证书也可连接）",
+                fontSize = 12.sp,
+                modifier = Modifier.padding(start = 8.dp)
+            )
+        }
+        HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.4f))
+        PasswordField(
+            cipher, { cipher = it },
+            label = if (sync.hasCipher) "新配置密码（留空不修改）" else "配置密码（至少 8 位）"
+        )
+        Text(
+            "用于加密备份文件，与 WebDAV 密码可以不同；忘记则云端备份无法恢复。",
+            fontSize = 12.sp,
+            color = MutedText,
+            lineHeight = 16.sp
+        )
+    }
 }
 
 @Composable
@@ -841,34 +841,30 @@ private fun CloudRestoreDialog(
 @Composable
 private fun DeviceNameDialog(current: String, onDismiss: () -> Unit, onConfirm: (String) -> Unit) {
     var text by remember { mutableStateOf(current) }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("本机配置名", fontWeight = FontWeight.Bold) },
-        text = {
-            Column {
-                OutlinedTextField(
-                    value = text,
-                    onValueChange = { text = it },
-                    singleLine = true,
-                    textStyle = TextStyle(fontSize = 14.sp),
-                    label = { Text("显示名", fontSize = 12.sp) },
-                    shape = RoundedCornerShape(12.dp),
-                    colors = dialogFieldColors(),
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Text(
-                    "这个名字会写进云端文件名，方便在列表里认出是哪台设备；" +
-                        "同型号的两台设备还会各带一个 4 位短码，名字一样也不会互相覆盖。",
-                    fontSize = 11.sp,
-                    color = MutedText,
-                    lineHeight = 15.sp,
-                    modifier = Modifier.padding(top = 8.dp)
-                )
-            }
-        },
+    FormDialog(
+        title = "本机配置名",
+        onDismiss = onDismiss,
+        spacing = 8.dp,
         confirmButton = {
             TextButton(onClick = { onConfirm(text) }, enabled = text.isNotBlank()) { Text("保存") }
-        },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
-    )
+        }
+    ) {
+        OutlinedTextField(
+            value = text,
+            onValueChange = { text = it },
+            singleLine = true,
+            textStyle = TextStyle(fontSize = 14.sp),
+            label = { Text("显示名", fontSize = 12.sp) },
+            shape = RoundedCornerShape(12.dp),
+            colors = dialogFieldColors(),
+            modifier = Modifier.fillMaxWidth()
+        )
+        Text(
+            "这个名字会写进云端文件名，方便在列表里认出是哪台设备；" +
+                "同型号的两台设备还会各带一个 4 位短码，名字一样也不会互相覆盖。",
+            fontSize = 11.sp,
+            color = MutedText,
+            lineHeight = 15.sp
+        )
+    }
 }

@@ -195,17 +195,13 @@ class FtpRepository {
                     paths.forEach { path ->
                         val name = path.trimEnd('/').substringAfterLast('/')
                         val target = "${destDir.trimEnd('/')}/$name"
+                        // 移动优先走服务端 rename：目录同样适用，也不用先落一份副本。
+                        // 服务端不允许（跨挂载点 / 无重命名权限）时退回「递归复制 + 删源」。
                         val done = if (move) {
-                            client.rename(path, target)
+                            client.rename(path, target) ||
+                                (copyTree(client, path, target) && removeTree(client, path))
                         } else {
-                            val temp = File.createTempFile("ftp-copy-", ".tmp")
-                            val ok = try {
-                                temp.outputStream().use { client.retrieveFile(path, it) } &&
-                                    temp.inputStream().use { client.storeFile(target, it) }
-                            } finally {
-                                temp.delete()
-                            }
-                            ok
+                            copyTree(client, path, target)
                         }
                         if (!done) allDone = false
                     }
@@ -213,6 +209,67 @@ class FtpRepository {
                 }
             }.getOrDefault(false)
         }
+
+    /**
+     * 递归复制文件 / 目录。
+     *
+     * 旧实现只对单文件做「下载到临时文件再上传」，目录直接走 retrieveFile(path) ——
+     * 那是个目录，服务端返回失败，于是在网络位置里复制文件夹必然失败。
+     */
+    private fun copyTree(client: FTPClient, source: String, target: String): Boolean = runCatching {
+        if (isDirectory(client, source)) {
+            ensureDir(client, target)
+            client.listFiles(source).forEach { child ->
+                val childName = child.name
+                if (childName != "." && childName != "..") {
+                    copyTree(client, "$source/$childName", "$target/$childName")
+                }
+            }
+            true
+        } else {
+            ensureDir(client, target.substringBeforeLast('/', ""))
+            val tmp = File.createTempFile("ftp-copy-", ".tmp")
+            try {
+                tmp.outputStream().use { client.retrieveFile(source, it) } &&
+                    tmp.inputStream().use { client.storeFile(target, it) }
+            } finally {
+                tmp.delete()
+            }
+        }
+    }.getOrDefault(false)
+
+    /** 递归删除（仅在 rename 不可用、需要「复制后再删源」时走这里）。 */
+    private fun removeTree(client: FTPClient, path: String): Boolean = runCatching {
+        if (isDirectory(client, path)) {
+            client.listFiles(path).forEach { child ->
+                val childName = child.name
+                if (childName != "." && childName != "..") removeTree(client, "$path/$childName")
+            }
+            client.removeDirectory(path)
+        } else {
+            client.deleteFile(path)
+        }
+        true
+    }.getOrDefault(false)
+
+    /** FTP 的 LIST 对文件也会返回一条「自身」，不能靠它判目录，改用 CWD 探一次再切回来。 */
+    private fun isDirectory(client: FTPClient, path: String): Boolean {
+        val current = runCatching { client.printWorkingDirectory() }.getOrDefault("/")
+        val isDir = runCatching { client.changeWorkingDirectory(path) }.getOrDefault(false)
+        if (isDir) runCatching { client.changeWorkingDirectory(current) }
+        return isDir
+    }
+
+    /** 逐级 MKD：远端很多目录（比如 /a/b/c）在复制前并不存在。 */
+    private fun ensureDir(client: FTPClient, dir: String) {
+        if (dir.isBlank() || dir == "/") return
+        var current = if (dir.startsWith("/")) "/" else ""
+        dir.trim('/').split('/').filter { it.isNotBlank() }.forEach { part ->
+            current = if (current.endsWith("/") || current.isEmpty()) "$current$part" else "$current/$part"
+            // 已存在时 MKD 会返回 550，忽略即可；真正的权限问题会在紧随其后的写操作暴露。
+            runCatching { client.makeDirectory(current) }
+        }
+    }
 
     private fun FTPFile.toEntry(dir: String): FileEntry? {
         if (name == "." || name == "..") return null

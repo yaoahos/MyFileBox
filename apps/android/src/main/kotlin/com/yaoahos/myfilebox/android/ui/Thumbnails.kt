@@ -123,10 +123,18 @@ fun FileThumb(file: FileEntry, size: Dp, modifier: Modifier = Modifier, dark: Bo
         }
         // 本地文件直接解码；远程图片 / 小体积视频通过注入的加载器取回缓存后解码，
         // 大视频或加载失败时回退到带播放角标的类型图标。
-        val path = if (localDecodable(file)) file.path else loader?.invoke(file)
-        if (path.isNullOrBlank()) return@LaunchedEffect
+        //
+        // 判断「本地能否解码」要 stat 一次文件，原来这步在主线程（LaunchedEffect 默认
+        // Main）上做，一屏十几张图就是一串同步 stat。整段挪进 IO，主线程不再碰文件系统。
         val loaded = withContext(Dispatchers.IO) {
-            if (file.kind == FileKind.VIDEO) decodeVideo(path) else decodeImage(path, size)
+            val path = if (localDecodable(file)) file.path else loader?.invoke(file)
+            if (path.isNullOrBlank()) {
+                null
+            } else if (file.kind == FileKind.VIDEO) {
+                decodeVideo(path)
+            } else {
+                decodeImage(path, size)
+            }
         }
         if (loaded != null) {
             ThumbCache.put(cacheKey, loaded)

@@ -42,6 +42,7 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.Android
 import androidx.compose.material.icons.outlined.Audiotrack
 import androidx.compose.material.icons.outlined.ChevronRight
@@ -621,6 +622,31 @@ fun InlineNotice(text: String, accent: Color, modifier: Modifier = Modifier) {
  * 选中态与排序方向一致——无框，只用强调色文字 + 对勾。
  */
 
+
+/**
+ * 页面左上角的返回按钮：圆形底 + 2dp 阴影、36dp 触区、18dp 图标。
+ *
+ * 回收站 / 共享管理以前直接摆裸 [IconButton]（24dp 图标、没有底色），
+ * 和浏览页 / 搜索 / 设置二级页的圆形按钮并排看就是两套风格。
+ * 现在所有页面只走这一个组件；选择态需要换成叉号时传 [icon]，文案传 [label]。
+ */
+@Composable
+fun CircleBackButton(
+    onClick: () -> Unit,
+    label: String = "返回",
+    icon: ImageVector = Icons.Outlined.ArrowBack
+) {
+    Surface(
+        shape = CircleShape,
+        color = MaterialTheme.colorScheme.surface,
+        shadowElevation = 2.dp,
+        modifier = Modifier.size(36.dp)
+    ) {
+        IconButton(onClick = onClick, modifier = Modifier.size(36.dp)) {
+            Icon(icon, label, modifier = Modifier.size(18.dp))
+        }
+    }
+}
 
 /**
  * 面包屑：空间够就整串显示；不够就从最外层开始一段一段丢掉（前面补「…」）。

@@ -521,20 +521,29 @@ internal fun isPermanentSyncFailure(message: String): Boolean =
 object ConfigSyncScheduler {
     private const val WORK_NAME = "myfilebox-config-sync"
 
-    fun apply(context: Context, autoHours: Int) {
+    /**
+     * [delayFirstRun] 为 true 时，第一轮排到一个周期之后。
+     *
+     * 保存配置或改周期时必须是 true：WorkManager 新建周期任务会立刻跑第一轮，
+     * 而此时本机配置往往还是默认值（用户刚填完 WebDAV 地址，其它设置一片空白），
+     * 上传就把云端那份好的覆盖成空壳——只能靠 `.prev` 捞回来，等于白折腾一次。
+     * 启动时恢复调度用 false：任务本来就该按既有节奏继续跑。
+     */
+    fun apply(context: Context, autoHours: Int, delayFirstRun: Boolean = false) {
         val workManager = runCatching { WorkManager.getInstance(context) }.getOrNull() ?: return
         if (autoHours <= 0) {
             workManager.cancelUniqueWork(WORK_NAME)
             return
         }
-        val request = PeriodicWorkRequestBuilder<ConfigSyncWorker>(autoHours.toLong(), TimeUnit.HOURS)
+        val builder = PeriodicWorkRequestBuilder<ConfigSyncWorker>(autoHours.toLong(), TimeUnit.HOURS)
             .setConstraints(
                 Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build()
             )
             // 失败重试从 1 分钟起指数退避（默认策略是 30 秒起、上限 5 小时）。
             // 网络恢复后能较快补上，真断网时也不会频繁唤醒。
             .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 1, TimeUnit.MINUTES)
-            .build()
+        if (delayFirstRun) builder.setInitialDelay(autoHours.toLong(), TimeUnit.HOURS)
+        val request = builder.build()
         runCatching {
             workManager.enqueueUniquePeriodicWork(WORK_NAME, ExistingPeriodicWorkPolicy.UPDATE, request)
         }

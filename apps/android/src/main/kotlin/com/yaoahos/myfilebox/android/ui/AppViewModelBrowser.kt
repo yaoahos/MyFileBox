@@ -1,5 +1,9 @@
 package com.yaoahos.myfilebox.android.ui
 
+import com.yaoahos.myfilebox.core.MODULE_LABEL_LOCAL
+import com.yaoahos.myfilebox.core.MODULE_LABEL_NET
+import com.yaoahos.myfilebox.core.MODULE_LABEL_SYNO
+import com.yaoahos.myfilebox.core.STORAGE_ROOT_LABEL
 import com.yaoahos.myfilebox.core.displayLeaf
 import android.app.Application
 import android.content.ClipData
@@ -325,7 +329,7 @@ internal fun AppViewModel.openLocalCategory(title: String, items: List<FileEntry
         val sorted = if (title == "最近") items.sortedByDescending { it.modified } else sortFiles(items)
         state = state.copy(
             browser = BrowserState(
-                title, "内部存储 / $title", FileContext.LOCAL, sorted,
+                title, "$MODULE_LABEL_LOCAL / $title", FileContext.LOCAL, sorted,
                 groupByDate = groupByDate, localCategory = title
             ),
             browserStack = emptyList(),
@@ -360,15 +364,15 @@ internal fun AppViewModel.openStorage(path: String, title: String) {
 
 
 /**
- * 本地路径的「所在位置」名：存储根目录统一叫「根目录」，其余取上一层目录名。
+ * 本地路径的「所在位置」名：存储根目录统一叫「内部存储」，其余取上一层目录名。
  *
  * 根目录是 /storage/emulated/0，末段是「0」——直接取末段会让根下的文件在详情里
- * 显示成「所在位置 0」。
+ * 显示成「所在位置 0」。名字统一走 [STORAGE_ROOT_LABEL]，不要再写字面量。
  */
 internal fun AppViewModel.localFolderLabel(path: String): String {
         val parent = path.substringBeforeLast('/', "")
         if (parent.isBlank()) return ""
-        return if (parent.trimEnd('/') == state.localRoot.trimEnd('/')) "根目录"
+        return if (parent.trimEnd('/') == state.localRoot.trimEnd('/')) STORAGE_ROOT_LABEL
         else parent.substringAfterLast('/')
     }
 
@@ -380,11 +384,12 @@ internal fun AppViewModel.openLocalFolderPath(path: String, title: String) {
             Environment.getExternalStorageDirectory().absolutePath.trimEnd('/')
         }
         val atRoot = path.trimEnd('/') == rootPath
-        val pageTitle = if (atRoot) "根目录" else title
+        val pageTitle = if (atRoot) STORAGE_ROOT_LABEL else title
         pushBrowser(
             BrowserState(
                 title = pageTitle,
-                path = "内部存储 / $pageTitle",
+                // 面包屑第一层是模块名，这里同步用它，避免 path 与面包屑两套叫法。
+                path = "$MODULE_LABEL_LOCAL / $pageTitle",
                 ctx = FileContext.LOCAL,
                 items = emptyList(),
                 location = path
@@ -551,7 +556,7 @@ internal fun AppViewModel.openShare(share: ShareFolder) {
             pushBrowser(
                 BrowserState(
                     title = share.title,
-                    path = "群晖文件 / ${share.title}",
+                    path = "$MODULE_LABEL_SYNO / ${share.title}",
                     ctx = FileContext.SYNO,
                     items = sortFiles(items),
                     location = path
@@ -596,7 +601,8 @@ internal fun AppViewModel.openConnection(connection: NetworkConnection) {
             pushBrowser(
                 BrowserState(
                     title = connection.name,
-                    path = "网络文件 / ${connection.name} / ${connection.protocol}",
+                    // 不带协议名：协议是连接属性，不是一层目录，放进面包屑只会占位。
+                    path = "$MODULE_LABEL_NET / ${connection.name}",
                     ctx = FileContext.NET,
                     items = sortFiles(items),
                     netId = connection.id,
@@ -1363,7 +1369,15 @@ internal fun AppViewModel.setViewMode(tab: TabKey, mode: String) {
 internal fun AppViewModel.favoriteKey(file: FileEntry): String = if (file.path.isNotBlank()) file.path else file.id
 
 
-internal fun AppViewModel.isFavorite(file: FileEntry): Boolean = favoriteKey(file) in state.prefs.favorites
+internal fun AppViewModel.isFavorite(file: FileEntry): Boolean {
+        val key = favoriteKey(file)
+        if (key in state.prefs.favorites) return true
+        // 群晖一侧还要认服务器自己的收藏列表：在 DSM 网页或另一台设备收藏过的文件夹，
+        // 本机没有记录，只看本地就会当成「未收藏」，再点收藏必然撞 800。
+        val synoCtx = state.browser?.ctx == FileContext.SYNO ||
+            (state.browser == null && state.tab == TabKey.SYNO)
+        return synoCtx && key in state.synoFavoritePaths
+    }
 
 
 internal fun AppViewModel.toggleFavorite(file: FileEntry) {
@@ -1426,9 +1440,10 @@ internal fun AppViewModel.favoriteFiles(ctx: FileContext = FileContext.LOCAL): L
             // 解析结果要按当前 favorites 集合再过一遍 —— 取消收藏后 synoFavorites 里
             // 还留着旧条目，不筛就会「取消了还在」（退出重进才重新解析，3.9.17 修）。
             FileContext.SYNO -> {
-                val resolved = state.synoFavorites.filter { favoriteKey(it) in keys }
+                val all = keys + state.synoFavoritePaths
+                val resolved = state.synoFavorites.filter { favoriteKey(it) in all }
                 if (resolved.isNotEmpty()) resolved
-                else state.shares.flatMap { it.items }.filter { favoriteKey(it) in keys }
+                else state.shares.flatMap { it.items }.filter { favoriteKey(it) in all }
             }
             FileContext.NET -> emptyList()
         }
@@ -1446,17 +1461,43 @@ internal fun AppViewModel.refreshSynoFavorites() {
             !it.startsWith("folder:") && !it.startsWith("net:") && !it.startsWith(root)
         }
         viewModelScope.launch {
+            // 先拿服务器上的真实收藏：本机记录之外的收藏也能列出来，
+            // 同时让「已收藏」的判断与服务端一致（不再出现点收藏回 800 的情况）。
+            val serverPaths = withContext(Dispatchers.IO) { dsm.listFavoritePaths(session) }
+            // 本机收藏与服务器收藏会有重叠（本应用加的文件夹两边都记着），
+            // 列表直接相加会让同一文件夹出现两次、还多一次 dsm.list 请求。
+            val all = (keys.toSet() + (serverPaths ?: state.synoFavoritePaths)).toList()
             val resolved = withContext(Dispatchers.IO) {
-                keys.mapNotNull { path ->
+                all.mapNotNull { path ->
                     val parent = path.substringBeforeLast('/', "")
                     val name = path.substringAfterLast('/')
                     if (parent.isBlank() || name.isBlank()) return@mapNotNull null
                     runCatching { dsm.list(session, parent) }.getOrDefault(emptyList())
                         .firstOrNull { it.name == name }
-                }
+                }.distinctBy { favoriteKey(it) }
+                // distinctBy 兜底：收藏列表页用 LazyColumn(key = id)，同一条目出现两次会
+                // 抛「Key was already used」直接闪退。本机与服务器收藏重叠时尤其容易触发。
             }
+            // 本机记着、服务器上没有的文件夹收藏，补传上去。
+            //
+            // 官方收藏只收文件夹（文件只能留在本机），所以这里只补文件夹；
+            // 不做这一步的话，早先版本加过的收藏永远只存在这台设备上，
+            // 另一台平板登录同一个账号自然看不到。补传是幂等的：服务器已经有了会回 800，
+            // setFavorite 内部按「已收藏」处理，不会报错。
+            val server = serverPaths ?: state.synoFavoritePaths
+            val missing = resolved
+                .filter { it.isFolder && it.path.isNotBlank() }
+                .filter { it.path.trimEnd('/') !in server }
+                .map { it.path.trimEnd('/') }
+                .take(40)
+            val pushed = if (serverPaths != null && missing.isNotEmpty()) {
+                val ok = withContext(Dispatchers.IO) { dsm.setFavorite(session, missing, true) }
+                if (ok) missing else emptyList()
+            } else emptyList()
+
             state = state.copy(
                 synoFavorites = resolved,
+                synoFavoritePaths = server + pushed,
                 // 收藏页是打开时的快照：解析完成后同步刷新，否则新收藏看不到。
                 browser = if (state.browser?.favorites == true) {
                     state.browser?.copy(items = resolved)
@@ -1501,28 +1542,55 @@ internal fun AppViewModel.currentSortTab(): String = when (state.browser?.ctx) {
     }
 
 
+/**
+ * 目录排序。
+ *
+ * 这里刻意不用 `compareBy { it.name.lowercase() }`：那是在**比较器里**做 lowercase，
+ * 一次排序要跑 O(n log n) 次比较，等于几万次字符串分配。1752 张图片的分类页在
+ * 主线程上算一次要 30～40ms，正是「点进图片分类，画面先顿一下再滑进来」的来源。
+ * 现在先把 key 算成与 items 等长的数组（O(n) 次分配），比较只比数组下标。
+ *
+ * 文件夹恒在文件前面，`dir` 只翻转同一类内部的值顺序（保持原有口径）。
+ */
 internal fun AppViewModel.sortFiles(items: List<FileEntry>, key: String = sortKeyFor(currentSortTab()), dir: String = sortDirFor(currentSortTab())): List<FileEntry> {
-        val valueComparator: Comparator<FileEntry> = when (key) {
-            "name" -> compareBy { it.name.lowercase() }
-            "size" -> compareBy { it.sizeBytes }
-            else -> compareBy { it.modified }
+        if (items.size < 2) return items
+        val asc = dir == "asc"
+        val names = if (key == "name") items.map { it.name.lowercase() } else null
+        val order = items.indices.sortedWith { a, b ->
+            val folderA = items[a].isFolder
+            val folderB = items[b].isFolder
+            if (folderA != folderB) return@sortedWith if (folderA) -1 else 1
+            val cmp = when (key) {
+                "name" -> names!![a].compareTo(names[b])
+                "size" -> items[a].sizeBytes.compareTo(items[b].sizeBytes)
+                else -> items[a].modified.compareTo(items[b].modified)
+            }
+            if (asc) cmp else -cmp
         }
-        // Folders stay on top in BOTH directions; only their internal order flips.
-        val ordered = if (dir == "asc") valueComparator else valueComparator.reversed()
-        return items.sortedWith(compareBy<FileEntry> { !it.isFolder }.then(ordered))
+        return order.map { items[it] }
     }
 
 
-    /** 首页文件夹卡按当前 Tab 的排序偏好排。 */
+    /**
+     * 首页文件夹卡按当前 Tab 的排序偏好排。
+     *
+     * 与 [sortFiles] 同一套做法：名称排序先算一遍小写数组，比较时不再逐次 `lowercase()`。
+     * 根目录有几百个文件夹时，这一处也是主线程上实打实的开销。
+     */
 internal fun AppViewModel.sortedFolders(items: List<FolderCard>, tabKey: String = currentSortTab()): List<FolderCard> {
+        if (items.size < 2) return items
         val key = sortKeyFor(tabKey)
-        val dir = sortDirFor(tabKey)
-        val comparator: Comparator<FolderCard> = when (key) {
-            "name" -> compareBy { it.name.lowercase() }
-            "size" -> compareBy { it.count.toLong() }
-            else -> compareBy { it.date }
+        val asc = sortDirFor(tabKey) == "asc"
+        val names = if (key == "name") items.map { it.name.lowercase() } else null
+        val order = items.indices.sortedWith { a, b ->
+            val cmp = when (key) {
+                "name" -> names!![a].compareTo(names[b])
+                "size" -> items[a].count.compareTo(items[b].count)
+                else -> items[a].date.compareTo(items[b].date)
+            }
+            if (asc) cmp else -cmp
         }
-        return if (dir == "asc") items.sortedWith(comparator) else items.sortedWith(comparator.reversed())
+        return order.map { items[it] }
     }
 
 

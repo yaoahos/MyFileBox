@@ -27,11 +27,7 @@ object UpdateLog {
     /** 「日期 + 版本号」标题行（整段日志塞进 Release 正文时不重复显示）。 */
     private val DATE_VERSION = Regex("""^\d{4}[/-]\d{1,2}[/-]\d{1,2}\s*[·\-—]?\s*v?\d+(?:\.\d+)*$""")
 
-    /** 噪声关键词：命中即丢弃该条目（发布信息、校验值之类不该进日志正文）。 */
-    private val NOISE = listOf(
-        "包名", "versionCode", "versionName", "版本号", "系统要求", "适用系统", "适用版本",
-        "安装说明", "安装包", "下载地址", "文件大小", "SHA", "MD5", "签名", "校验值", "更新于"
-    )
+    /** 噪声判定统一走 [isNoiseEntry]，与 Release 正文清洗共用一份规则。 */
 
     /** 某版本的条目全被过滤掉时的兜底文案。 */
     const val FALLBACK_NOTE = "问题修复与稳定性优化。"
@@ -97,7 +93,7 @@ object UpdateLog {
         line = BULLET.replace(line, "").trim()
         line = line.replace("**", "").replace("`", "").trim()
         if (line.isBlank()) return null
-        if (NOISE.any { line.contains(it, ignoreCase = true) }) return null
+        if (isNoiseEntry(line)) return null
         if (line.startsWith("#") || line.startsWith(">") || line.startsWith("|") ||
             line.startsWith("![") || line.startsWith("---")
         ) return null

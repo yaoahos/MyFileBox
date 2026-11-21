@@ -37,6 +37,7 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyItemScope
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -128,7 +129,7 @@ import androidx.compose.runtime.setValue
 import kotlinx.coroutines.delay
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Brush
@@ -234,7 +235,10 @@ fun MainShell(state: MyFileBoxState, vm: AppViewModel, tabOverride: TabKey? = nu
             // 真实底栏画在页面宿主之外（AppRoot 固定层），这里只保留一个等高、
             // 全透明的占位，让 Scaffold 继续自动为页面内容留出底部空间。
             // 用同一个组件占位，可保证多选操作栏 / 标签栏两种高度都精确一致。
-            Box(Modifier.alpha(0f)) {
+            // 这份底栏只用来占高度，从头到尾不可见（真底栏画在页面宿主之外）。
+            // 用 drawWithContent{} 而不是 alpha(0f)：布局完全一致，但整棵子树不再录绘制指令，
+            // 也不需要一层 alpha 图层——Alpha(0) 仍会把内容录进图层。
+            Box(Modifier.drawWithContent { }) {
                 FixedBottomBar(state, vm, activeTab)
             }
         }
@@ -598,15 +602,37 @@ internal fun FilterEmptyHint(vm: AppViewModel) {
     }
 }
 
+/**
+ * 列表空状态。
+ *
+ * 短屏（横屏 / 分屏）要压缩上下留白与图标：底栏是浮在内容上的胶囊，占掉底部约 96dp，
+ * 空状态按竖屏的 56dp 图标 + 36dp 上下留白排下来，提示行正好落在底栏底下被压住
+ * （网络页横屏实测）。压缩后整体约 100dp，能在底栏之上完整显示。
+ */
 @Composable
 internal fun EmptyModules(text: String, hint: String = "可在设置的「首页显示」中重新开启") {
+    val compact = LocalConfiguration.current.screenHeightDp < 480
     Column(
-        Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 36.dp),
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 20.dp, vertical = if (compact) 8.dp else 36.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        FolderGlyph(56)
-        Text(text, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 12.dp))
-        Text(hint, fontSize = 12.sp, color = MutedText, modifier = Modifier.padding(top = 4.dp))
+        FolderGlyph(if (compact) 40 else 56)
+        Text(
+            text,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.SemiBold,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.padding(top = if (compact) 8.dp else 12.dp)
+        )
+        Text(
+            hint,
+            fontSize = 12.sp,
+            color = MutedText,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.padding(top = 4.dp)
+        )
     }
 }
 
@@ -616,11 +642,7 @@ internal fun VolumeDialog(state: MyFileBoxState, vm: AppViewModel, onDismiss: ()
         onDismissRequest = onDismiss,
         title = { Text("存储空间", fontWeight = FontWeight.Bold) },
         text = {
-            Column(
-                Modifier
-                    .imePadding()
-                    .verticalScroll(rememberScrollState())
-            ) {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
                 Text("NAS 上检测到 ${state.volumes.size} 个存储空间，点击切换查看。", fontSize = 12.sp, color = MutedText, modifier = Modifier.padding(bottom = 8.dp))
                 state.volumes.forEach { volume ->
                     Row(

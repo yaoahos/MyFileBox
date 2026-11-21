@@ -86,9 +86,45 @@ import java.io.File
 import java.util.UUID
 
 
+/**
+ * 群晖回收站：把某一层的结果写进当前列表，同时更新分层缓存。
+ *
+ * 缓存只服务于「切换层级时的转场」：返回上一层如果还要等网络，滑进来的就是
+ * 一张「正在加载回收站…」的空白页，和浏览页返回时直接显示已有列表的观感对不上。
+ * 本地回收站没有层级，不写缓存。
+ */
+private fun AppViewModel.putRecycleLevel(dir: String, items: List<RecycleItem>, loading: Boolean = false) {
+    state = state.copy(
+        recycleItems = items,
+        recycleLoading = loading,
+        recycleLevels = if (state.recycleContext == FileContext.SYNO) {
+            state.recycleLevels.trimmedLevel(dir, items)
+        } else {
+            state.recycleLevels
+        }
+    )
+}
+
+
+/** 条目内容变了（还原 / 彻底删除）：只更新当前这一层的缓存。 */
+private fun MyFileBoxState.withRecycleItems(items: List<RecycleItem>): MyFileBoxState = copy(
+    recycleItems = items,
+    recycleLevels = if (recycleContext == FileContext.SYNO) recycleLevels.trimmedLevel(recycleDir, items) else recycleLevels
+)
+
+
+/** 分层缓存只留最近 12 层，长时间逐层浏览也不积压。 */
+private fun Map<String, List<RecycleItem>>.trimmedLevel(dir: String, items: List<RecycleItem>): Map<String, List<RecycleItem>> {
+    val next = this + (dir to items)
+    if (next.size <= 12) return next
+    return next.entries.drop(next.size - 12).associate { it.key to it.value }
+}
+
+
 internal fun AppViewModel.openRecycle(ctx: FileContext = FileContext.LOCAL) {
         if (ctx == FileContext.SYNO) {
-            val session = state.session
+            // 上一次看过的汇总层先顶上：转场滑进来时就有内容，随后静默刷新。
+            val cached = if (state.recycleContext == FileContext.SYNO) state.recycleLevels[""] else null
             state = state.copy(
                 recycleOpen = true,
                 recycleSelected = emptySet(),
@@ -97,20 +133,15 @@ internal fun AppViewModel.openRecycle(ctx: FileContext = FileContext.LOCAL) {
                 recycleNameFilter = "",
                 recycleExtFilter = "",
                 recycleContext = FileContext.SYNO,
-                recycleItems = emptyList(),
-                recycleLoading = true
+                recycleDir = "",
+                recycleItems = cached ?: emptyList(),
+                recycleLoading = cached == null
             )
             viewModelScope.launch {
                 // 索引是本地 JSON 文件，读它和合并后的写回都不能留在 UI 线程。
-                val items = withContext(Dispatchers.IO) {
-                    val tracked = synoRecycleIndex.all()
-                    session?.let {
-                        dsm.listRecycleBin(it, state.shares.map { s -> s.path }, tracked = tracked)
-                    }.orEmpty()
-                }
-                withContext(Dispatchers.IO) { pruneSynoRecycleIndex(items) }
-                if (state.recycleContext == FileContext.SYNO) {
-                    state = state.copy(recycleItems = items, recycleLoading = false)
+                val items = withContext(Dispatchers.IO) { loadSynoRecycleSummary() }
+                if (state.recycleContext == FileContext.SYNO && state.recycleDir.isBlank()) {
+                    putRecycleLevel("", items)
                 }
             }
         } else {
@@ -123,6 +154,7 @@ internal fun AppViewModel.openRecycle(ctx: FileContext = FileContext.LOCAL) {
                 recycleNameFilter = "",
                 recycleExtFilter = "",
                 recycleContext = FileContext.LOCAL,
+                recycleDir = "",
                 recycleItems = cached,
                 recycleLoading = true
             )
@@ -145,37 +177,223 @@ private fun AppViewModel.readLocalRecycle(): List<RecycleItem> =
         runCatching { local.listRecycle() }.getOrDefault(emptyList())
 
 
-internal fun AppViewModel.closeRecycle() { state = state.copy(recycleOpen = false, recycleSelected = emptySet(), recycleSelecting = false) }
+internal fun AppViewModel.closeRecycle() {
+        state = state.copy(
+            recycleOpen = false,
+            recycleSelected = emptySet(),
+            recycleSelecting = false,
+            // 下次进来从汇总视图开始，不能停在上次钻进去的子目录。
+            recycleDir = ""
+        )
+    }
 
 
     /** 回收站下拉刷新：与其它文件列表页保持一致的手势。 */
+/**
+ * 群晖回收站：点进一个文件夹。
+ *
+ * DSM 的 #recycle 保留原路径，删 /photo/trip/a.jpg 后是 /photo/#recycle/trip/a.jpg。
+ * 以前整棵树被 BFS 打平成一张清单，同名文件堆在一起看不出归属；现在文件夹点得进去，
+ * 逐层展开。本地回收站不走这里——本地每个条目就是一个独立删除单元，夹内不是可浏览目录。
+ */
+internal fun AppViewModel.openRecycleFolder(item: RecycleItem) {
+        if (state.recycleContext != FileContext.SYNO || !item.isFolder) return
+        val dir = item.trashPath.trimEnd('/')
+        // 之前进过这一层就直接用缓存顶上，转场期间就有内容，不等网络。
+        val cached = state.recycleLevels[dir]
+        state = state.copy(
+            recycleDir = dir,
+            recycleSelected = emptySet(),
+            recycleSelecting = false,
+            recycleItems = cached ?: emptyList(),
+            recycleLoading = cached == null,
+            // 换目录等于换内容，沿用筛选只会得到一屏空。
+            recycleNameFilter = "",
+            recycleExtFilter = ""
+        )
+        val session = state.session
+        viewModelScope.launch {
+            val items = withContext(Dispatchers.IO) { loadSynoRecycleDir(session, dir) }
+            if (state.recycleDir == dir) {
+                putRecycleLevel(dir, items)
+            }
+        }
+    }
+
+
+    /**
+     * 离开回收站页面时把「钻到第几层」重置掉。
+     *
+     * 只清 `recycleDir` 不够：列表里装的还是子目录内容，回来就会对不上。
+     * 回收站仍开着（被设置 / 分享等页面盖住）时顺手重拉一次汇总视图，
+     * 这样返回回收站看到的就是各共享 `#recycle` 的并列层，而不是上次那个子目录。
+     */
+internal fun AppViewModel.resetRecycleToSummary() {
+        if (state.recycleDir.isBlank()) return
+        val stillOpen = state.recycleOpen
+        val cached = if (state.recycleContext == FileContext.SYNO) state.recycleLevels[""] else null
+        state = state.copy(
+            recycleDir = "",
+            recycleItems = cached ?: emptyList(),
+            recycleLoading = stillOpen && cached == null,
+            recycleSelected = emptySet(),
+            recycleSelecting = false
+        )
+        if (!stillOpen) return
+        viewModelScope.launch {
+            val items = withContext(Dispatchers.IO) { loadSynoRecycleSummary() }
+            if (state.recycleOpen && state.recycleDir.isBlank()) {
+                putRecycleLevel("", items)
+            }
+        }
+    }
+
+
+    /** 群晖回收站返回上一层：子目录 → 上级目录；已在 #recycle 根 → 回汇总视图。 */
+internal fun AppViewModel.backRecycleFolder() {
+        val dir = state.recycleDir
+        if (dir.isBlank()) return
+        val parent = dir.trimEnd('/').substringBeforeLast('/', "")
+        // 到 share/#recycle 这一层就没有「上一级目录」可看了：汇总视图本来就是
+        // 各共享 #recycle 的一层内容。
+        val toSummary = parent.isBlank() || parent.endsWith("/#recycle")
+        val target = if (toSummary) "" else parent
+        // 上一层刚才就在屏幕上，缓存一定有；直接顶上，滑进来就是完整列表。
+        val cached = state.recycleLevels[target]
+        state = state.copy(
+            recycleDir = target,
+            recycleSelected = emptySet(),
+            recycleSelecting = false,
+            recycleItems = cached ?: emptyList(),
+            recycleLoading = cached == null
+        )
+        val session = state.session
+        viewModelScope.launch {
+            val items = withContext(Dispatchers.IO) {
+                if (toSummary) {
+                    loadSynoRecycleSummary()
+                } else {
+                    loadSynoRecycleDir(session, parent)
+                }
+            }
+            if (state.recycleDir == target) {
+                putRecycleLevel(target, items)
+            }
+        }
+    }
+
+
+/**
+ * 群晖回收站的汇总视图：各共享 `#recycle` 下的**一层**条目 + 记录在案的删除单元。
+ *
+ * 以前这里是 BFS 全量摊平（上限 500 条），深层文件全平铺在一屏里，同名文件
+ * 根本看不出归属。现在只列一层，文件夹点得进去，逐层展开就是原目录结构。
+ * 记在索引里的「删除单元」仍直接列出来——那是用户真正删掉的那个文件夹，
+ * 不该被埋进中间层目录里。
+ */
+internal suspend fun AppViewModel.loadSynoRecycleSummary(): List<RecycleItem> {
+        val session = state.session ?: return emptyList()
+        val items = dsm.listRecycleBin(
+            session,
+            state.shares.map { s -> s.path },
+            topLevelOnly = true,
+            tracked = synoRecycleIndex.all()
+        )
+        pruneSynoRecycleIndex(items)
+        return items
+    }
+
+
+/** 列 `#recycle` 的某一层；每个条目仍带「删除前在哪」，还原照旧按它走。 */
+private suspend fun AppViewModel.loadSynoRecycleDir(session: Session?, dir: String): List<RecycleItem> {
+        if (session == null) return emptyList()
+        val listed = runCatching { dsm.list(session, dir) }.getOrDefault(emptyList())
+        return listed.filter { it.name != "#recycle" }.map { entry ->
+            RecycleItem(
+                id = entry.path,
+                name = entry.name,
+                originalPath = originalPathOfTrash(entry.path),
+                trashPath = entry.path,
+                deletedAt = entry.modified,
+                sizeBytes = entry.sizeBytes,
+                isFolder = entry.isFolder
+            )
+        }
+    }
+
+
+/**
+ * 重新拉「当前这一屏」的回收列表。
+ *
+ * 钻在 `#recycle` 子目录里时只刷这一层——否则还原 / 删除一个条目之后，
+ * 列表会突然被换回汇总视图，用户明明还停在文件夹里。
+ */
+internal suspend fun AppViewModel.recycleItemsNow(): List<RecycleItem> =
+        if (state.recycleContext == FileContext.SYNO && state.recycleDir.isNotBlank()) {
+            loadSynoRecycleDir(state.session, state.recycleDir)
+        } else if (state.recycleContext == FileContext.SYNO) {
+            loadSynoRecycleSummary()
+        } else {
+            readLocalRecycle()
+        }
+
+
+/**
+ * `#recycle` 里的路径还原成删除前的原路径：
+ * `/photo/#recycle/trip/a.jpg` → `/photo/trip/a.jpg`。
+ */
+internal fun originalPathOfTrash(trashPath: String): String {
+        val marker = "/#recycle"
+        val idx = trashPath.indexOf(marker)
+        if (idx < 0) return trashPath
+        val share = trashPath.substring(0, idx)
+        val rel = trashPath.substring(idx + marker.length).trimStart('/')
+        return if (rel.isBlank()) share else "$share/$rel"
+    }
+
+
 internal fun AppViewModel.refreshRecycle() {
-        if (state.refreshing) return
+        // 与其它页同一套下拉令牌：beginPull 开圈、endPull 收圈，endPull 会撑满
+        // minPullVisibleMs 再落下「已刷新」，避免转圈还没转完提示就抢先出现。
+        val token = beginPull()
         val ctx = state.recycleContext
         if (ctx == FileContext.SYNO) {
-            val session = state.session ?: return
+            val session = state.session ?: run { endPull(token); return }
             viewModelScope.launch {
-                state = state.copy(refreshing = true)
+                // 先清掉上一次操作残留的错误，本轮失败与否只看这一轮的 lastError。
+                dsm.lastError = null
+                val dir = state.recycleDir
+                val atSummary = dir.isBlank()
                 val items = withContext(Dispatchers.IO) {
-                    val tracked = synoRecycleIndex.all()
-                    dsm.listRecycleBin(session, state.shares.map { s -> s.path }, tracked = tracked)
+                    if (atSummary) {
+                        loadSynoRecycleSummary()
+                    } else {
+                        // 钻在子目录里刷新，刷的就该是这一层，别把用户从文件夹里弹出去。
+                        loadSynoRecycleDir(session, dir)
+                    }
                 }
-                withContext(Dispatchers.IO) { pruneSynoRecycleIndex(items) }
-                if (state.recycleContext == FileContext.SYNO) {
-                    state = state.copy(recycleItems = items, refreshing = false)
+                // 索引保存的是「删除单元」（整只文件夹）。只有汇总层拿到的才是全量列表，
+                // 子目录只是一层，拿它 retain 会把其它目录的删除单元记录全清掉。
+                if (atSummary) withContext(Dispatchers.IO) { pruneSynoRecycleIndex(items) }
+                // 刷新未回时可能已经返回到父目录：不能把子目录的结果写进父目录的列表和缓存。
+                if (state.recycleDir == dir && state.recycleContext == FileContext.SYNO) {
+                    // 列表数据先落（不等转圈），但 refreshing / message 交给 endPull 在转圈结束后统一收。
+                    state = state.withRecycleItems(items)
+                    val notice = dsm.lastError?.takeIf { it.isNotBlank() } ?: "已刷新"
+                    endPull(token, notice)
                 } else {
-                    state = state.copy(refreshing = false)
+                    endPull(token)
                 }
             }
         } else {
             // 本地同样不能在 UI 线程读清单：条目上千时读盘就是一次明显掉帧。
             viewModelScope.launch {
-                state = state.copy(refreshing = true)
                 val items = withContext(Dispatchers.IO) { readLocalRecycle() }
-                state = if (state.recycleContext == FileContext.LOCAL) {
-                    state.copy(recycleItems = items, refreshing = false)
+                if (state.recycleContext == FileContext.LOCAL) {
+                    state = state.copy(recycleItems = items)
+                    endPull(token, "已刷新")
                 } else {
-                    state.copy(refreshing = false)
+                    endPull(token)
                 }
             }
         }
@@ -197,8 +415,8 @@ internal fun AppViewModel.restoreRecycle(item: RecycleItem) {
             )
             if (state.recycleContext == FileContext.SYNO) {
                 if (ok) withContext(Dispatchers.IO) { synoRecycleIndex.remove(listOf(item.trashPath)) }
-                val items = withContext(Dispatchers.IO) { freshSynoRecycleItems() }
-                state = state.copy(recycleItems = items)
+                val items = withContext(Dispatchers.IO) { recycleItemsNow() }
+                state = state.withRecycleItems(items)
                 // 群晖恢复后要让原目录重新拉一次列表，否则回到原位置还是旧内容。
                 if (ok) {
                     refreshSyno()
@@ -354,7 +572,7 @@ internal fun AppViewModel.restoreRecycleMany(items: List<RecycleItem>) {
             }
             val fresh = withContext(Dispatchers.IO) {
                 when (state.recycleContext) {
-                    FileContext.SYNO -> freshSynoRecycleItems()
+                    FileContext.SYNO -> recycleItemsNow()
                     else -> runCatching { local.listRecycle() }.getOrDefault(emptyList())
                 }
             }
@@ -362,6 +580,12 @@ internal fun AppViewModel.restoreRecycleMany(items: List<RecycleItem>) {
                 localTaskRunning = false,
                 localTaskLabel = "",
                 recycleItems = fresh,
+                // 刚变过的是当前这一层，顺手更新缓存（群晖）。
+                recycleLevels = if (state.recycleContext == FileContext.SYNO) {
+                    state.recycleLevels + (state.recycleDir to fresh)
+                } else {
+                    state.recycleLevels
+                },
                 message = when {
                     failed == 0 -> "已还原 $ok 项"
                     ok == 0 -> "还原失败：${dsm.lastError ?: "请稍后重试"}"
@@ -416,7 +640,7 @@ internal fun AppViewModel.deleteRecycleItems(items: List<RecycleItem>) {
             }
             val fresh = withContext(Dispatchers.IO) {
                 when (state.recycleContext) {
-                    FileContext.SYNO -> freshSynoRecycleItems()
+                    FileContext.SYNO -> recycleItemsNow()
                     else -> runCatching { local.listRecycle() }.getOrDefault(emptyList())
                 }
             }
@@ -424,6 +648,11 @@ internal fun AppViewModel.deleteRecycleItems(items: List<RecycleItem>) {
                 localTaskRunning = false,
                 localTaskLabel = "",
                 recycleItems = fresh,
+                recycleLevels = if (state.recycleContext == FileContext.SYNO) {
+                    state.recycleLevels + (state.recycleDir to fresh)
+                } else {
+                    state.recycleLevels
+                },
                 message = if (ok) "已彻底删除 ${items.size} 项" else "删除失败：${dsm.lastError ?: "请稍后重试"}"
             )
         }
@@ -431,6 +660,9 @@ internal fun AppViewModel.deleteRecycleItems(items: List<RecycleItem>) {
 
 
 internal fun AppViewModel.emptyRecycle() {
+        // 群晖子目录里只允许逐项删；清空作用于整个 bin，站在子层执行会只删一层、
+        // 却把删除单元索引清光，留下再也还原不了的残留项。UI 已隐藏该入口，这里兜底。
+        if (state.recycleContext == FileContext.SYNO && state.recycleDir.isNotBlank()) return
         viewModelScope.launch {
             // 清空回收站是同类静默操作：本地要递归删掉整棵回收站目录，群晖是一次
             // deleteRecycleItems 请求，文件一多就是几秒钟没有任何反馈。顶部任务条兜住。
@@ -453,6 +685,8 @@ internal fun AppViewModel.emptyRecycle() {
                         }.orEmpty()
                     }
                     state = state.copy(
+                        // 清空是跨层的破坏性操作，缓存整块作废，下次进页面重新拉。
+                        recycleLevels = emptyMap(),
                         recycleItems = fresh,
                         message = if (ok) "已清空回收站 · ${paths.size} 项" else dsm.lastError ?: "清空失败"
                     )

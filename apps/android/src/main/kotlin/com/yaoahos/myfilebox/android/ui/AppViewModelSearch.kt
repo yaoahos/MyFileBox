@@ -54,6 +54,9 @@ import com.yaoahos.myfilebox.android.data.offlineNetworkMessage
 import com.yaoahos.myfilebox.android.data.networkStatusNotice
 import com.yaoahos.myfilebox.core.displayLeaf
 import com.yaoahos.myfilebox.core.AppPrefs
+import com.yaoahos.myfilebox.core.MODULE_LABEL_LOCAL
+import com.yaoahos.myfilebox.core.MODULE_LABEL_NET
+import com.yaoahos.myfilebox.core.MODULE_LABEL_SYNO
 import com.yaoahos.myfilebox.core.FileEntry
 import com.yaoahos.myfilebox.core.FileKind
 import com.yaoahos.myfilebox.core.FileKinds
@@ -159,10 +162,10 @@ internal fun AppViewModel.searchRootDestinations(ctx: FileContext): List<Destina
                 .listFiles().orEmpty()
                 .filter { it.isDirectory && !it.name.startsWith('.') && it.canRead() }
                 .sortedBy { it.name.lowercase() }
-                .map { Destination(DestType.LOCAL, it.absolutePath, it.name, "内部存储 / ${it.name}", it.absolutePath) }
+                .map { Destination(DestType.LOCAL, it.absolutePath, it.name, "$MODULE_LABEL_LOCAL / ${it.name}", it.absolutePath) }
         }.getOrDefault(emptyList())
         FileContext.SYNO -> state.shares.map {
-            Destination(DestType.SYNO, it.path, it.title, "群晖 NAS / ${it.title}", it.path)
+            Destination(DestType.SYNO, it.path, it.title, "$MODULE_LABEL_SYNO / ${it.title}", it.path)
         }
         FileContext.NET -> state.connections.map {
             Destination(DestType.NET, it.id, it.name, "${it.protocol} / ${it.host}", network.rootPath(it))
@@ -332,7 +335,7 @@ internal fun AppViewModel.searchResults(search: SearchState): List<FileEntry> {
                     id = "search-share:${share.path}",
                     name = share.title,
                     kind = FileKind.FOLDER,
-                    folder = "群晖 NAS",
+                    folder = MODULE_LABEL_SYNO,
                     path = share.path
                 )
             } + state.searchIndexSyno

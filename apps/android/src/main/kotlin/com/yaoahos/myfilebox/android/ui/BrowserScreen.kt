@@ -118,6 +118,9 @@ import androidx.compose.ui.unit.sp
 import com.yaoahos.myfilebox.android.data.filterSummary
 import com.yaoahos.myfilebox.android.data.itemMatchesFilter
 import com.yaoahos.myfilebox.core.FileEntry
+import com.yaoahos.myfilebox.core.MODULE_LABEL_LOCAL
+import com.yaoahos.myfilebox.core.MODULE_LABEL_NET
+import com.yaoahos.myfilebox.core.MODULE_LABEL_SYNO
 import java.io.File
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
@@ -147,6 +150,17 @@ fun BrowserScreen(state: MyFileBoxState, vm: AppViewModel) {
     var showUploadFolder by remember { mutableStateOf(false) }
     val selecting = state.selectionActive || state.selected.isNotEmpty()
     val favoritesPage = browser.title == "收藏"
+
+    // 收藏页的条目来自不同目录，只显示名字会分不清「Temp」到底是哪个共享下的。
+    // 群晖显示完整父路径（/Backup），本地 / 网络只取末段，避免整条存储路径把行撑满。
+    fun favoriteSubtitle(file: FileEntry): String {
+        val parent = file.path.substringBeforeLast('/', "")
+        val label = when (browser.ctx) {
+            FileContext.SYNO -> parent.ifBlank { file.folder }
+            else -> parent.substringAfterLast('/').ifBlank { file.folder }
+        }
+        return listOf(label, file.timeLabel).filter { it.isNotBlank() }.joinToString(" · ")
+    }
     val crumbTrail = state.browserStack + listOfNotNull(browser)
     // 清单 1（3.1.0）：所有文件不再给三点按钮，FileActionSheet 已删除；操作走长按多选。
     val rowShowMore = false
@@ -195,14 +209,11 @@ fun BrowserScreen(state: MyFileBoxState, vm: AppViewModel) {
                 Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Surface(shape = CircleShape, color = MaterialTheme.colorScheme.surface, shadowElevation = 2.dp, modifier = Modifier.size(36.dp)) {
-                    IconButton(
-                        onClick = { if (selecting) vm.clearSelection() else vm.backFromBrowser() },
-                        modifier = Modifier.size(36.dp)
-                    ) {
-                        Icon(if (selecting) Icons.Outlined.Close else Icons.Outlined.ArrowBack, "返回", modifier = Modifier.size(18.dp))
-                    }
-                }
+                CircleBackButton(
+                    onClick = { if (selecting) vm.clearSelection() else vm.backFromBrowser() },
+                    label = if (selecting) "退出选择" else "返回",
+                    icon = if (selecting) Icons.Outlined.Close else Icons.Outlined.ArrowBack
+                )
                 Column(Modifier.weight(1f).padding(start = 11.dp)) {
                     Text(
                         if (selecting) "已选择 ${state.selected.size} 项" else browser.title,
@@ -219,23 +230,25 @@ fun BrowserScreen(state: MyFileBoxState, vm: AppViewModel) {
                             maxLines = 1
                         )
                     } else {
-                        val rootLabel = when (browser.ctx) {
-                            FileContext.LOCAL -> "内部存储"
-                            FileContext.SYNO -> "群晖 NAS"
-                            FileContext.NET -> "网络存储"
+                        val moduleLabel = when (browser.ctx) {
+                            FileContext.LOCAL -> MODULE_LABEL_LOCAL
+                            FileContext.SYNO -> MODULE_LABEL_SYNO
+                            FileContext.NET -> MODULE_LABEL_NET
                         }
-                        // 只有一层（分类页 / 端根）时没有逐级页面可点：把 path 按「 / 」摊成
-                        // 若干段参与同一套取舍，别整串丢给省略号，那样最里层名字会被截断。
-                        val trailLabels = if (crumbTrail.size <= 1) {
-                            browser.path.split(" / ").map { it.trim() }.filter { it.isNotBlank() }
-                        } else crumbTrail.map { it.title }
-                        // 端名固定当最外层（不对应某个页面，只作定位用）；path 里已经带了端名时去掉重复。
-                        val tail = if (trailLabels.firstOrNull() == rootLabel) trailLabels.drop(1) else trailLabels
+                        // 第一层固定是模块名（本地文件 / 群晖文件 / 网络文件），第二层起就是
+                        // 用户真正走过的页面：本地是首页里的文件夹，网络是连接名，群晖是共享文件夹。
+                        //
+                        // 不再从 browser.path 拆段：path 里塞过「内部存储」「网络文件」「协议名」，
+                        // 拆出来就成了「网络存储 › 网络文件 › 我的群晖 › WebDAV」——结构层、模块名、
+                        // 协议全混在一条线上，而且中间那几段点了也回不去。
+                        val trail = crumbTrail.map { it.title }
+                            // 单层页面且标题与模块名相同时只留一层，避免「本地文件 › 本地文件」。
+                            .let { if (it.size == 1 && it.first() == moduleLabel) emptyList() else it }
                         PathBreadcrumbs(
-                            labels = listOf(rootLabel) + tail,
+                            labels = listOf(moduleLabel) + trail,
                             emphasizeCurrent = false,
                             chevronSize = 11.dp,
-                            // 第 0 段是端名，第 i 段对应面包屑第 i-1 层。
+                            // 第 0 段是模块名，不对应任何页面；第 i 段对应面包屑第 i-1 层。
                             clickableFrom = 1,
                             onCrumbClick = if (crumbTrail.size > 1) { index ->
                                 vm.jumpToCrumb(index - 1)
@@ -503,7 +516,7 @@ fun BrowserScreen(state: MyFileBoxState, vm: AppViewModel) {
                                 if (file.isFolder) {
                                     BrowserFolderTile(
                                         name = file.name,
-                                        date = file.timeLabel,
+                                        date = if (favoritesPage) favoriteSubtitle(file) else file.timeLabel,
                                         count = file.childCount,
                                         selected = file.id in state.selected, selecting = selecting,
                                         showCount = browser.ctx == FileContext.LOCAL,
@@ -511,7 +524,10 @@ fun BrowserScreen(state: MyFileBoxState, vm: AppViewModel) {
                                             if (selecting) { if (canSelect) vm.toggleSelected(file) } else vm.openFolder(file)
                                         },
                                         onLongClick = { if (canSelect) vm.toggleSelected(file) },
-                                        onUnfavorite = null
+                                        // 收藏页里文件夹也要能一键取消，与文件行保持同一套操作。
+                                        onUnfavorite = if (favoritesPage && !selecting) {
+                                            { vm.unfavorite(file) }
+                                        } else null
                                     )
                                 } else {
                                     FileGridCard(
@@ -566,13 +582,15 @@ fun BrowserScreen(state: MyFileBoxState, vm: AppViewModel) {
                                 if (file.isFolder) {
                                     FolderListRow(
                                         name = file.name,
-                                        date = file.timeLabel,
+                                        date = if (favoritesPage) favoriteSubtitle(file) else file.timeLabel,
                                         count = file.childCount,
                                         fallbackMeta = file.folder,
                                         showCount = browser.ctx == FileContext.LOCAL,
                                         selected = file.id in state.selected, selecting = selecting,
                                         onLongClick = { if (canSelect) vm.toggleSelected(file) },
-                                        onUnfavorite = null,
+                                        onUnfavorite = if (favoritesPage && !selecting) {
+                                            { vm.unfavorite(file) }
+                                        } else null,
                                         onClick = {
                                             if (selecting) { if (canSelect) vm.toggleSelected(file) } else vm.openFolder(file)
                                         }
@@ -756,22 +774,9 @@ fun BrowserScreen(state: MyFileBoxState, vm: AppViewModel) {
         )
     }
     if (showNewFolder) {
-        AlertDialog(
-            onDismissRequest = { showNewFolder = false },
-            title = { Text("新建文件夹") },
-            text = {
-                Column(Modifier.imePadding().verticalScroll(rememberScrollState())) {
-                    OutlinedTextField(
-                        value = newFolderName,
-                        onValueChange = { newFolderName = it },
-                        singleLine = true,
-                        label = { Text("文件夹名称") },
-                        shape = RoundedCornerShape(12.dp),
-                        colors = dialogFieldColors(),
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                }
-            },
+        FormDialog(
+            title = "新建文件夹",
+            onDismiss = { showNewFolder = false },
             confirmButton = {
                 TextButton(
                     enabled = newFolderName.isNotBlank(),
@@ -780,27 +785,23 @@ fun BrowserScreen(state: MyFileBoxState, vm: AppViewModel) {
                         showNewFolder = false
                     }
                 ) { Text("创建") }
-            },
-            dismissButton = { TextButton(onClick = { showNewFolder = false }) { Text("取消") } }
-        )
+            }
+        ) {
+            OutlinedTextField(
+                value = newFolderName,
+                onValueChange = { newFolderName = it },
+                singleLine = true,
+                label = { Text("文件夹名称") },
+                shape = RoundedCornerShape(12.dp),
+                colors = dialogFieldColors(),
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
     }
     if (showNewFile) {
-        AlertDialog(
-            onDismissRequest = { showNewFile = false },
-            title = { Text("新建文件") },
-            text = {
-                Column(Modifier.imePadding().verticalScroll(rememberScrollState())) {
-                    OutlinedTextField(
-                        value = newFileName,
-                        onValueChange = { newFileName = it },
-                        singleLine = true,
-                        label = { Text("文件名（含扩展名）") },
-                        shape = RoundedCornerShape(12.dp),
-                        colors = dialogFieldColors(),
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                }
-            },
+        FormDialog(
+            title = "新建文件",
+            onDismiss = { showNewFile = false },
             confirmButton = {
                 TextButton(
                     enabled = newFileName.isNotBlank(),
@@ -809,9 +810,18 @@ fun BrowserScreen(state: MyFileBoxState, vm: AppViewModel) {
                         showNewFile = false
                     }
                 ) { Text("创建") }
-            },
-            dismissButton = { TextButton(onClick = { showNewFile = false }) { Text("取消") } }
-        )
+            }
+        ) {
+            OutlinedTextField(
+                value = newFileName,
+                onValueChange = { newFileName = it },
+                singleLine = true,
+                label = { Text("文件名（含扩展名）") },
+                shape = RoundedCornerShape(12.dp),
+                colors = dialogFieldColors(),
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
     }
     if (showAddMenu) {
         val actions = buildList {
@@ -1158,8 +1168,19 @@ fun TransferSheet(state: MyFileBoxState, vm: AppViewModel) {
                     Text("没有子文件夹", fontSize = 12.sp, color = MutedText)
                 }
             } else {
-                Column(Modifier.fillMaxWidth().padding(top = 6.dp)) {
-                    rows.forEach { dest ->
+                // 子目录可能有几百个。原来 Column + forEach 会把它们一次全部组合，
+                // 打开选择器的那一帧就全压在主线上了。改成定高 LazyColumn，只组合可见行；
+                // 定高之后它在外层 scrolling Column 里测得的约束是有限的，不会触发
+                // 「Lazy 组件被无限高度测量」的崩溃。
+                LazyColumn(
+                    Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 320.dp)
+                        .padding(top = 6.dp)
+                ) {
+                    // 不挂 key：目标列表里理论上可能出现两条同 identity 的条目，
+                    // 重复 key 会让 Lazy 直接抛异常；这些行按位置复用即可。
+                    items(rows) { dest ->
                         val isRoot = currentVal == null
                         TransferDestRow(
                             icon = if (isRoot) destIcon(dest.type) else Icons.Outlined.Folder,
@@ -1287,10 +1308,11 @@ fun TransferSheet(state: MyFileBoxState, vm: AppViewModel) {
 
 private fun Destination.identity(): String = "${type.name}|$key|$path"
 
+// 目标选择器里的类型标签：与面包屑第一层同一口径。
 private fun destTypeLabel(type: DestType): String = when (type) {
-    DestType.LOCAL -> "内部存储"
-    DestType.SYNO -> "群晖 NAS"
-    DestType.NET -> "网络存储"
+    DestType.LOCAL -> MODULE_LABEL_LOCAL
+    DestType.SYNO -> MODULE_LABEL_SYNO
+    DestType.NET -> MODULE_LABEL_NET
 }
 
 private fun destIcon(type: DestType): ImageVector = when (type) {

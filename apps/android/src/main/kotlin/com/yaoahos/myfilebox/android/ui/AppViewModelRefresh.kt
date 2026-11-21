@@ -898,8 +898,14 @@ internal fun AppViewModel.saveSyncConfig(
         )
         syncStore.save(next, cipher.takeIf { it.isNotBlank() })
         val stored = syncStore.load()
-        state = state.copy(sync = stored, message = "已保存云同步设置")
-        ConfigSyncScheduler.apply(getApplication(), if (stored.configured) stored.autoHours else 0)
+        // 保存只落盘，不立刻上传：这时本机配置可能还是默认值，一上传就把云端那份好的
+        // 覆盖掉。第一轮自动同步排到一个周期之后，想马上传用「立即上传」。
+        state = state.copy(sync = stored, message = "已保存云同步设置，将按所选周期自动上传")
+        ConfigSyncScheduler.apply(
+            getApplication(),
+            if (stored.configured) stored.autoHours else 0,
+            delayFirstRun = true
+        )
     }
 
 
@@ -911,7 +917,8 @@ internal fun AppViewModel.setSyncInterval(hours: Int) {
             sync = stored,
             message = "自动同步：${SyncInterval.ofHours(hours).label}"
         )
-        ConfigSyncScheduler.apply(getApplication(), if (stored.configured) hours else 0)
+        // 改周期同样延后第一轮，避免「刚调完间隔就立刻传一次」。
+        ConfigSyncScheduler.apply(getApplication(), if (stored.configured) hours else 0, delayFirstRun = true)
     }
 
 

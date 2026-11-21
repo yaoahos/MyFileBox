@@ -38,10 +38,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.yaoahos.myfilebox.android.data.LocalRepository
 import com.yaoahos.myfilebox.core.ShareLink
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 
 /**
  * 群晖共享管理（清单 4）：统一查看 / 取消全部共享链接，并清除无效链接。
@@ -58,7 +56,7 @@ fun ShareManagerScreen(state: MyFileBoxState, vm: AppViewModel) {
         val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
         AppPullToRefreshBox(
             isRefreshing = state.refreshing,
-            onRefresh = { vm.refreshShareLinks() },
+            onRefresh = { vm.refreshShareLinks(notice = true) },
             modifier = Modifier.fillMaxSize()
         ) {
             // 标题与返回固定（3.9.16），不随共享链接列表滚走。
@@ -66,23 +64,19 @@ fun ShareManagerScreen(state: MyFileBoxState, vm: AppViewModel) {
                 Column(
                     Modifier
                         .fillMaxWidth()
-                        .statusBarsPadding()
-                        .padding(horizontal = 18.dp)
+                        // 与回收 / 浏览页同一口径：稳定状态栏高度，别用 statusBarsPadding()
+                        // （启动外部应用时 MIUI 的 insets 会变小，整页会往上跳一下）。
+                        .padding(top = rememberStableStatusBarTop())
+                        .padding(horizontal = 14.dp)
                 ) {
                         Row(
-                            Modifier.fillMaxWidth().padding(top = 10.dp),
+                            Modifier.fillMaxWidth().padding(top = 8.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            IconButton(onClick = vm::closeShareManager) {
-                                Icon(Icons.Outlined.ArrowBack, "返回")
-                            }
-                            Column(Modifier.weight(1f)) {
+                            CircleBackButton(onClick = vm::closeShareManager)
+                            // 与传输 / 设置二级页一致：标题离箭头 12dp。
+                            Column(Modifier.weight(1f).padding(start = 12.dp)) {
                                 Text("共享管理", fontSize = 24.sp, fontWeight = FontWeight.Bold)
-                                Text(
-                                    "群晖官方共享链接 · 可统一取消",
-                                    fontSize = 12.sp,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
                             }
                             if (state.shareLinks.any { it.invalid }) {
                                 TextButton(onClick = { vm.clearInvalidShareLinks() }) {
@@ -90,6 +84,16 @@ fun ShareManagerScreen(state: MyFileBoxState, vm: AppViewModel) {
                                 }
                             }
                         }
+                        // 说明独占整行：与「回收」页同一口径，避免被右侧按钮挤成两行断句。
+                        // 与传输页副标题同款：单独一行、左起 20dp。
+                        Text(
+                            "群晖官方共享链接",
+                            fontSize = 13.sp,
+                            color = MutedText,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 20.dp, vertical = 2.dp)
+                        )
                     }
                 LazyColumn(
                     modifier = Modifier.weight(1f),
@@ -258,4 +262,4 @@ private fun Badge(text: String, danger: Boolean = false) {
 }
 
 private fun expireLabel(ms: Long): String =
-    SimpleDateFormat("yyyy/MM/dd", Locale.getDefault()).format(Date(ms))
+    LocalRepository.formatWith("yyyy/MM/dd", ms)

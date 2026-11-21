@@ -53,6 +53,9 @@ import com.yaoahos.myfilebox.android.data.NetStatus
 import com.yaoahos.myfilebox.android.data.offlineNetworkMessage
 import com.yaoahos.myfilebox.android.data.networkStatusNotice
 import com.yaoahos.myfilebox.core.AppPrefs
+import com.yaoahos.myfilebox.core.MODULE_LABEL_LOCAL
+import com.yaoahos.myfilebox.core.MODULE_LABEL_NET
+import com.yaoahos.myfilebox.core.MODULE_LABEL_SYNO
 import com.yaoahos.myfilebox.core.FileEntry
 import com.yaoahos.myfilebox.core.FileKind
 import com.yaoahos.myfilebox.core.FileKinds
@@ -336,8 +339,17 @@ internal fun AppViewModel.favoriteSynoSelected() {
             items.forEach { file ->
                 if (allFavorited) next.remove(favoriteKey(file)) else next.add(favoriteKey(file))
             }
+            // 服务器上的收藏集合同步更新，否则刚点完星标要等下一次进收藏页才亮。
+            val folderPaths = if (state.synoFavoriteSupported) folders.map { it.path.trimEnd('/') } else emptyList()
             state = state.copy(
                 prefs = state.prefs.copy(favorites = next),
+                synoFavoritePaths = if (folderPaths.isEmpty()) {
+                    state.synoFavoritePaths
+                } else if (allFavorited) {
+                    state.synoFavoritePaths - folderPaths.toSet()
+                } else {
+                    state.synoFavoritePaths + folderPaths
+                },
                 selected = emptySet(),
                 selectionActive = false,
                 message = if (allFavorited) "已取消群晖收藏 ${items.size} 项"
@@ -367,38 +379,102 @@ internal fun AppViewModel.favoriteSelected() = favoriteEntries(selectedItems())
      * [fromSearch] 只为清掉搜索页那份独立勾选；勾选存在 state.searchSelected 里，
      * 不复用 selected，所以这里必须显式收尾。
      */
+/**
+ * 群晖文件夹收藏必须同步到 DSM（官方收藏只收文件夹）。
+ *
+ * 只改本机集合会造成「本机显示已收藏、服务器没有」，之后再从服务器角度点收藏
+ * 就会互相打架。返回 null = 成功；否则是要展示给用户的文案，此时不要改本地状态。
+ */
+private suspend fun AppViewModel.pushSynoFavorite(folders: List<FileEntry>, on: Boolean): String? {
+    if (folders.isEmpty()) return null
+    val session = state.session ?: return null
+    if (!state.synoFavoriteSupported) return null
+    val ok = dsm.setFavorite(session, folders.map { it.path.trimEnd('/') }, on)
+    return if (ok) null else (dsm.lastError ?: "收藏失败，请稍后重试")
+}
+
+
 internal fun AppViewModel.favoriteEntries(entries: List<FileEntry>, fromSearch: Boolean = false) {
         if (entries.isEmpty()) return
         val allFavorited = entries.all { isFavorite(it) }
-        val next = state.prefs.favorites.toMutableSet()
-        entries.forEach { file -> if (allFavorited) next.remove(favoriteKey(file)) else next.add(favoriteKey(file)) }
-        state = state.copy(
-            prefs = state.prefs.copy(favorites = next),
-            selected = emptySet(),
-            selectionActive = false,
-            searchSelected = if (fromSearch) emptySet() else state.searchSelected,
-            searchSelecting = if (fromSearch) false else state.searchSelecting,
-            message = if (allFavorited) "已取消收藏 ${entries.size} 项" else "已收藏 ${entries.size} 项"
-        )
-        persist()
-        // 多选面板里的「收藏 / 取消收藏」也只改集合，不重算列表的话，
-        // 在收藏页取消收藏后条目会赖着不走（3.9.17）。
-        if (state.browser?.favorites == true) viewModelScope.launch { reloadBrowserItems() }
+        val folders = entries.filter { it.isFolder && it.path.isNotBlank() }
+        val syncSyno = state.browser?.ctx == FileContext.SYNO
+
+        fun commit() {
+            val next = state.prefs.favorites.toMutableSet()
+            entries.forEach { file -> if (allFavorited) next.remove(favoriteKey(file)) else next.add(favoriteKey(file)) }
+            val folderPaths = if (syncSyno && state.synoFavoriteSupported) {
+                folders.map { it.path.trimEnd('/') }
+            } else emptyList()
+            state = state.copy(
+                prefs = state.prefs.copy(favorites = next),
+                synoFavoritePaths = when {
+                    folderPaths.isEmpty() -> state.synoFavoritePaths
+                    allFavorited -> state.synoFavoritePaths - folderPaths.toSet()
+                    else -> state.synoFavoritePaths + folderPaths
+                },
+                selected = emptySet(),
+                selectionActive = false,
+                searchSelected = if (fromSearch) emptySet() else state.searchSelected,
+                searchSelecting = if (fromSearch) false else state.searchSelecting,
+                message = if (allFavorited) "已取消收藏 ${entries.size} 项" else "已收藏 ${entries.size} 项"
+            )
+            persist()
+            // 多选面板里的「收藏 / 取消收藏」也只改集合，不重算列表的话，
+            // 在收藏页取消收藏后条目会赖着不走（3.9.17）。
+            if (state.browser?.favorites == true) viewModelScope.launch { reloadBrowserItems() }
+        }
+
+        // 群晖浏览页：先让服务器点头，再改本机集合，避免两边状态打架。
+        if (syncSyno && folders.isNotEmpty()) {
+            viewModelScope.launch {
+                val err = pushSynoFavorite(folders, !allFavorited)
+                if (err != null) {
+                    state = state.copy(message = err, selected = emptySet(), selectionActive = false)
+                } else commit()
+            }
+        } else {
+            commit()
+        }
     }
 
 
 internal fun AppViewModel.favoriteHomeSelection() {        val entries = homeSelectedEntries()
         if (entries.isEmpty()) return
         val allFavorited = entries.all { isFavorite(it) }
-        val next = state.prefs.favorites.toMutableSet()
-        entries.forEach { file -> if (allFavorited) next.remove(favoriteKey(file)) else next.add(favoriteKey(file)) }
-        state = state.copy(
-            prefs = state.prefs.copy(favorites = next),
-            homeSelected = emptySet(),
-            homeSelecting = false,
-            message = if (allFavorited) "已取消收藏 ${entries.size} 项" else "已收藏 ${entries.size} 项"
-        )
-        persist()
+        val folders = entries.filter { it.isFolder && it.path.isNotBlank() }
+        val syncSyno = state.tab == TabKey.SYNO && state.session != null
+
+        fun commit() {
+            val next = state.prefs.favorites.toMutableSet()
+            entries.forEach { file -> if (allFavorited) next.remove(favoriteKey(file)) else next.add(favoriteKey(file)) }
+            val folderPaths = if (syncSyno && state.synoFavoriteSupported) {
+                folders.map { it.path.trimEnd('/') }
+            } else emptyList()
+            state = state.copy(
+                prefs = state.prefs.copy(favorites = next),
+                synoFavoritePaths = when {
+                    folderPaths.isEmpty() -> state.synoFavoritePaths
+                    allFavorited -> state.synoFavoritePaths - folderPaths.toSet()
+                    else -> state.synoFavoritePaths + folderPaths
+                },
+                homeSelected = emptySet(),
+                homeSelecting = false,
+                message = if (allFavorited) "已取消收藏 ${entries.size} 项" else "已收藏 ${entries.size} 项"
+            )
+            persist()
+        }
+
+        if (syncSyno && folders.isNotEmpty()) {
+            viewModelScope.launch {
+                val err = pushSynoFavorite(folders, !allFavorited)
+                if (err != null) {
+                    state = state.copy(message = err, homeSelected = emptySet(), homeSelecting = false)
+                } else commit()
+            }
+        } else {
+            commit()
+        }
     }
 
 
@@ -456,16 +532,28 @@ internal fun AppViewModel.openShareManager() {
 internal fun AppViewModel.closeShareManager() { state = state.copy(shareManagerOpen = false) }
 
 
-    /** 共享管理下拉刷新：refreshing 驱动顶部刷新指示器，和文件列表页一致。 */
-internal fun AppViewModel.refreshShareLinks(forceClean: Boolean = false) {
+    /**
+     * 共享管理刷新：走 beginPull/endPull，与其它页同款最短转圈时长、看门狗与提示。
+     * [notice] 仅用户主动下拉时为 true——进入页面 / 建链接后的自动刷新不弹「已刷新」。
+     */
+internal fun AppViewModel.refreshShareLinks(forceClean: Boolean = false, notice: Boolean = false) {
+        // beginPull 会清 message；自动刷新（进页面 / 建链接后）不能把刚写的
+        // 「共享链接已复制」这类成功提示抹掉，先存后还原。
+        val keepMessage = if (!notice) state.message else null
+        val token = beginPull()
+        if (keepMessage != null) state = state.copy(message = keepMessage)
         val session = state.session ?: run {
-            state = state.copy(shareLinksLoading = false, shareLinks = emptyList(), refreshing = false)
+            state = state.copy(shareLinksLoading = false, shareLinks = emptyList())
+            endPull(token)
             return
         }
-        state = state.copy(shareLinksLoading = true, refreshing = true)
+        dsm.lastError = null
+        state = state.copy(shareLinksLoading = true)
         viewModelScope.launch {
             val links = withContext(Dispatchers.IO) { dsm.listShareLinks(session, forceClean) }
-            state = state.copy(shareLinks = links, shareLinksLoading = false, refreshing = false)
+            state = state.copy(shareLinks = links, shareLinksLoading = false)
+            val message = if (notice) (dsm.lastError?.takeIf { it.isNotBlank() } ?: "已刷新") else null
+            endPull(token, message)
         }
     }
 
@@ -768,13 +856,30 @@ internal fun AppViewModel.uploadLocalFolderToCurrent(dirPath: String) {
 
 internal fun AppViewModel.unfavorite(file: FileEntry) {
         val keys = setOf(file.id, favoriteKey(file), "folder:${file.path}")
-        state = state.copy(
-            prefs = state.prefs.copy(favorites = state.prefs.favorites - keys),
-            selected = state.selected - file.id,
-            message = "已取消收藏"
-        )
-        persist()
-        viewModelScope.launch { reloadBrowserItems() }
+        val path = file.path.trimEnd('/')
+        val synoFolder = state.browser?.ctx == FileContext.SYNO && file.isFolder && path.isNotBlank()
+
+        fun commit() {
+            state = state.copy(
+                prefs = state.prefs.copy(favorites = state.prefs.favorites - keys),
+                synoFavoritePaths = if (synoFolder) state.synoFavoritePaths - path else state.synoFavoritePaths,
+                selected = state.selected - file.id,
+                message = "已取消收藏"
+            )
+            persist()
+            viewModelScope.launch { reloadBrowserItems() }
+        }
+
+        // 群晖文件夹在服务器上也有这条收藏：必须让服务器先删掉，
+        // 否则本地刚点掉、下次刷新又从服务器列表里冒出来。
+        if (synoFolder && state.synoFavoriteSupported) {
+            viewModelScope.launch {
+                val err = pushSynoFavorite(listOf(file), false)
+                if (err != null) state = state.copy(message = err) else commit()
+            }
+        } else {
+            commit()
+        }
     }
 
 
@@ -782,14 +887,31 @@ internal fun AppViewModel.unfavoriteSelected() {
         val items = selectedItems()
         if (items.isEmpty()) return
         val removed = items.flatMap { setOf(it.id, favoriteKey(it), "folder:${it.path}") }.toSet()
-        state = state.copy(
-            prefs = state.prefs.copy(favorites = state.prefs.favorites - removed),
-            selected = emptySet(),
-            selectionActive = false,
-            message = "已取消收藏 ${items.size} 项"
-        )
-        persist()
-        viewModelScope.launch { reloadBrowserItems() }
+        val folders = items.filter { it.isFolder && it.path.isNotBlank() }
+        val syno = state.browser?.ctx == FileContext.SYNO && state.synoFavoriteSupported
+
+        fun commit() {
+            state = state.copy(
+                prefs = state.prefs.copy(favorites = state.prefs.favorites - removed),
+                synoFavoritePaths = if (syno) {
+                    state.synoFavoritePaths - folders.map { it.path.trimEnd('/') }.toSet()
+                } else state.synoFavoritePaths,
+                selected = emptySet(),
+                selectionActive = false,
+                message = "已取消收藏 ${items.size} 项"
+            )
+            persist()
+            viewModelScope.launch { reloadBrowserItems() }
+        }
+
+        if (syno && folders.isNotEmpty()) {
+            viewModelScope.launch {
+                val err = pushSynoFavorite(folders, false)
+                if (err != null) state = state.copy(message = err) else commit()
+            }
+        } else {
+            commit()
+        }
     }
 
 
@@ -852,8 +974,18 @@ internal fun AppViewModel.stageClipboard(mode: TransferMode, items: List<FileEnt
         else if (browser != null && !browserIsVirtual()) browser.location.ifBlank { browser.path }
         else if (ctx == FileContext.LOCAL) state.localRoot
         else ""
+        // 网络端的连接 id：搜索页里没有 browser 上下文，之前直接写 null。
+        // 结果是从搜索结果复制后再粘到同一个网络位置时，canPasteHere 拿
+        // 「空 id」跟真实连接 id 比不相等，被判成跨端、提示只能用上传 / 下载
+        // （坚果云这类 WebDAV 位置就是这么被挡的）。这里按文件路径反查所属连接，
+        // 与 openSearchResult 用的是同一套判定。
+        val resolvedNetId = if (ctx != FileContext.NET) null
+        else browser?.netId ?: state.connections.firstOrNull { conn ->
+            val root = network.rootPath(conn)
+            items.any { it.path.startsWith(root) || (conn.host.isNotBlank() && it.path.contains(conn.host)) }
+        }?.id
         state = state.copy(
-            clipboard = ClipboardState(mode, items, ctx, if (ctxOverride != null) null else browser?.netId, sourceDir),
+            clipboard = ClipboardState(mode, items, ctx, resolvedNetId, sourceDir),
             selected = emptySet(),
             selectionActive = false,
             searchSelected = if (ctxOverride != null) emptySet() else state.searchSelected,
@@ -891,7 +1023,9 @@ internal fun AppViewModel.canPasteHere(): Boolean {
         val browser = state.browser ?: return false
         if (browserIsVirtual()) return false
         if (clip.ctx != browser.ctx) return false
-        if (clip.ctx == FileContext.NET && clip.netId != browser.netId) return false
+        // 连接 id 可能有一边是 null（进连接首页时就复制、老状态），按空串比较，
+        // 否则「根目录复制 → 子目录粘贴」这种最普通的同端操作会被判成跨端。
+        if (clip.ctx == FileContext.NET && clip.netId.orEmpty() != browser.netId.orEmpty()) return false
         if (!clip.sourceDir.isBlank()) {
             val here = browser.location.ifBlank { browser.path }
             if (sameDir(clip.sourceDir, here)) return false
@@ -905,7 +1039,7 @@ internal fun AppViewModel.isPasteSourceHere(): Boolean {
         val clip = state.clipboard ?: return false
         val browser = state.browser ?: return false
         if (clip.ctx != browser.ctx) return false
-        if (clip.ctx == FileContext.NET && clip.netId != browser.netId) return false
+        if (clip.ctx == FileContext.NET && clip.netId.orEmpty() != browser.netId.orEmpty()) return false
         return sameDir(clip.sourceDir, browser.location.ifBlank { browser.path })
     }
 
@@ -920,9 +1054,9 @@ internal fun AppViewModel.cancelClipboard() {
 internal fun AppViewModel.clipboardLabel(): String {
         val clip = state.clipboard ?: return ""
         val kind = when (clip.ctx) {
-            FileContext.LOCAL -> "内部存储"
-            FileContext.SYNO -> "群晖 NAS"
-            FileContext.NET -> "网络存储"
+            FileContext.LOCAL -> MODULE_LABEL_LOCAL
+            FileContext.SYNO -> MODULE_LABEL_SYNO
+            FileContext.NET -> MODULE_LABEL_NET
         }
         return "${if (clip.mode == TransferMode.COPY) "已复制" else "已剪切"} ${clip.items.size} 项 · $kind"
     }
@@ -946,10 +1080,16 @@ internal fun AppViewModel.pasteClipboard() {
             return
         }
         if (!canPasteHere()) {
-            state = state.copy(
-                message = if (isPasteSourceHere()) "已在来源目录，换个位置再粘贴"
-                          else "跨端文件只能用上传 / 下载传输，粘贴仅支持同一端内"
-            )
+            // 三种拒绝原因分开说：同一目录 / 两个不同的网络位置 / 跨端。
+            // 之前一律报「跨端」，从 A 网络位置粘到 B 网络位置时用户会以为是自己弄错了端。
+            val sameCtx = clip.ctx == browser.ctx
+            val message = when {
+                isPasteSourceHere() -> "已在来源目录，换个位置再粘贴"
+                sameCtx && clip.ctx == FileContext.NET ->
+                    "不同网络位置之间只能用上传 / 下载传输"
+                else -> "跨端文件只能用上传 / 下载传输，粘贴仅支持同一端内"
+            }
+            state = state.copy(message = message)
             return
         }
         if (clip.mode == TransferMode.MOVE && clip.ctx != browser.ctx) {
@@ -961,15 +1101,26 @@ internal fun AppViewModel.pasteClipboard() {
             FileContext.SYNO -> DestType.SYNO
             FileContext.NET -> DestType.NET
         }
+        // NET 端的「连接 id」要兜底到当前浏览页：粘贴请求里的 netId 和目标的 key
+        // 必须取同一个值，否则 performTransfer 的 sameSide 判定会把同端粘贴当跨端。
+        // 复制时没记到 netId（老状态、搜索页进来等）就用当前浏览页的连接。
+        val netId = if (clip.ctx == FileContext.NET) clip.netId ?: browser.netId else clip.netId
         val destination = Destination(
             type = type,
-            key = browser.location.ifBlank { browser.path },
+            // NET 端的 key 是「连接 id」——destinationsFor / childDirectories 都按这个口径构造，
+            // performTransfer 也用 destination.key 跟 request.netId 比来判断是不是同端。
+            // 这里原来填的是目标路径，于是同一次修剪贴也会被判成跨端、提示
+            // 「只能用上传 / 下载传输」（坚果云等 WebDAV 位置就是这么被挡的）。
+            key = when (type) {
+                DestType.NET -> netId.orEmpty()
+                else -> browser.location.ifBlank { browser.path }
+            },
             label = browser.title,
             meta = browser.title,
             path = browser.location.ifBlank { browser.path }
         )
         state = state.copy(
-            transfer = TransferRequest(clip.mode, clip.items, clip.ctx, clip.netId, listOf(destination)),
+            transfer = TransferRequest(clip.mode, clip.items, clip.ctx, netId, listOf(destination)),
             clipboard = null
         )
         performTransfer(destination)
