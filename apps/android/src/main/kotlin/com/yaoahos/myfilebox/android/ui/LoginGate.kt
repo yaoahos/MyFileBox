@@ -160,15 +160,19 @@ import com.yaoahos.myfilebox.android.ui.theme.semanticColors
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun LoginGate(state: MyFileBoxState, vm: AppViewModel) {
-    val saved = remember { vm.savedLogin() }
+    // 删除已保存的连接后，预填内容要立刻变空：remember 的键加一个自增序号，
+    // 否则表单还停在旧地址 / 旧密码上，看着像没删掉。
+    var prefillNonce by remember { mutableStateOf(0) }
+    var confirmDeleteSaved by remember { mutableStateOf(false) }
+    val saved = remember(prefillNonce) { vm.savedLogin() }
     // 编辑连接时用当前会话的地址 / 账号预填，登录成功才替换，失败也不影响正在用的连接。
-    var server by remember(state.session, state.connectionEditing) {
+    var server by remember(state.session, state.connectionEditing, prefillNonce) {
         mutableStateOf(state.session?.server ?: saved.first)
     }
-    var account by remember(state.session, state.connectionEditing) {
+    var account by remember(state.session, state.connectionEditing, prefillNonce) {
         mutableStateOf(state.session?.account ?: saved.second)
     }
-    var password by remember { mutableStateOf(saved.third) }
+    var password by remember(prefillNonce) { mutableStateOf(saved.third) }
     var https by remember { mutableStateOf(true) }
     var remember by remember { mutableStateOf(true) }
     var allowSelfSigned by remember { mutableStateOf(true) }
@@ -342,10 +346,49 @@ internal fun LoginGate(state: MyFileBoxState, vm: AppViewModel) {
                             color = MutedText,
                             modifier = Modifier.padding(top = 6.dp)
                         )
+                        // 未登录时账号菜单不可达（整页就是这张登录表单），所以「删除连接」
+                        // 只能在这里给一个入口：本机还存着地址 / 账号时才显示。
+                        // 用普通 Text 而不是 TextButton：TextButton 自带 40dp 最小高度和
+                        // 水平内边距，会和上面几行说明错开一条左边线，行距也被撑开。
+                        if (!state.connectionEditing && (saved.first.isNotBlank() || saved.second.isNotBlank())) {
+                            Text(
+                                "删除已保存的连接",
+                                fontSize = 12.sp,
+                                lineHeight = 17.sp,
+                                color = MaterialTheme.colorScheme.error,
+                                modifier = Modifier
+                                    .padding(top = 6.dp)
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .clickable { confirmDeleteSaved = true }
+                            )
+                        }
                     }
                 }
             }
         }
+    }
+    if (confirmDeleteSaved) {
+        AlertDialog(
+            onDismissRequest = { confirmDeleteSaved = false },
+            title = { Text("删除群晖连接", fontWeight = FontWeight.Bold) },
+            text = {
+                Text(
+                    "将清除本机保存的服务器地址、账号与密码，不会影响群晖上的文件。\n" +
+                        "之后需要重新输入完整连接信息才能登录。"
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmDeleteSaved = false
+                    vm.deleteSynoConnection()
+                    prefillNonce++
+                }) { Text("删除", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmDeleteSaved = false }) { Text("取消") }
+            }
+        )
     }
 }
 

@@ -37,15 +37,29 @@ data class BackupInfo(
 )
 
 /**
+ * 恢复结果。
+ *
+ * [connectionsNeedingPassword] / [synoPasswordMissing] 用来告诉用户「配置都回来了，
+ * 但钥匙得自己补」：新版备份按安全约定不保存密码，恢复后这些条目要重新输入一次。
+ */
+data class ApplyResult(
+    val sections: List<BackupSection>,
+    val connectionsNeedingPassword: Int = 0,
+    val synoPasswordMissing: Boolean = false
+)
+
+/**
  * 配置备份：把设置项打包成 JSON，整体交给 [BackupCrypto] 加密。
  *
- * 三条硬约束：
+ * 四条硬约束：
  * 1. **没有任何明文落盘**。JSON 只在内存里存在，写出去的第一个字节就是密文文件头。
  * 2. **口令不进文件**。文件里只有「口令校验值」（HMAC 截断 8 字节），只能用来
  *    区分「密码错」和「文件坏」，反推不出口令。
- * 3. **凭据随包加密、导入时换钥匙**。导出时把 SecretVault（设备绑定 Keystore）
- *    里的密码解出来，放进这个已被口令加密的容器；导入时再用本机 Keystore 重新
- *    加密落盘。因此备份可以跨设备恢复，本机静态存储仍然是设备绑定的。
+ * 3. **不含任何密码**。群晖登录密码与每条网络连接的密码都不导出，只保存地址、
+ *    端口、账号、路径这些「连到哪」的信息。原因：备份会被放到网盘或另一台设备，
+ *    把一批服务器密码集中进一个只由「8 位口令」保护的文件，等于把安全性从设备
+ *    绑定的 Keystore 降到用户记忆的口令。恢复后首次连接需重新输入密码。
+ * 4. **连接清单导入时仍用本机 Keystore 加密落盘**，本机静态存储始终设备绑定。
  */
 object ConfigBackup {
 
@@ -120,9 +134,11 @@ object ConfigBackup {
      * 先算出所有需要重新加密的凭据，全部成功才提交：任何一步加密失败都整体放弃，
      * 不会出现「主题导入成功、网络位置被清空」这种半截状态。
      */
-    fun apply(prefs: SharedPreferences, data: JSONObject): List<BackupSection> {
+    fun apply(prefs: SharedPreferences, data: JSONObject): ApplyResult {
         val editor = prefs.edit()
         val applied = mutableListOf<BackupSection>()
+        var connectionsNeedingPassword = 0
+        var synoPasswordMissing = false
 
         data.optJSONObject(BackupSection.SYNO.key)?.let { o ->
             o.optString("loginServer").takeIf { it.isNotBlank() }?.let { editor.putString("login_server", it) }
@@ -132,9 +148,14 @@ object ConfigBackup {
             }
             val password = o.optString("loginPassword")
             if (password.isNotBlank()) {
+                // 旧版备份带密码：照常导入，保持向后兼容。
                 val enc = SecretVault.encrypt(password)
                 if (enc.isBlank()) throw IllegalStateException("凭据加密失败，本次导入已取消")
                 editor.putString("login_password", enc)
+            } else {
+                // 新版备份不含密码：本机也没存过才需要提示补输，已有密码就别打扰。
+                val local = prefs.getString("login_password", "").orEmpty()
+                synoPasswordMissing = local.isBlank()
             }
             applied += BackupSection.SYNO
         }
@@ -145,6 +166,7 @@ object ConfigBackup {
                 val enc = SecretVault.encrypt(raw)
                 if (enc.isBlank()) throw IllegalStateException("凭据加密失败，本次导入已取消")
                 editor.putString("connections", enc)
+                connectionsNeedingPassword = countPasswordlessConnections(raw)
             }
             applied += BackupSection.NETWORK
         }
@@ -178,7 +200,7 @@ object ConfigBackup {
             throw BackupCryptoException(BackupError.BAD_FORMAT, "备份里没有可导入的配置")
         }
         editor.apply()
-        return applied
+        return ApplyResult(applied, connectionsNeedingPassword, synoPasswordMissing)
     }
 
     /**
@@ -223,13 +245,17 @@ object ConfigBackup {
         data.put(BackupSection.SYNO.key, JSONObject().apply {
             put("loginServer", all["login_server"] as? String ?: "")
             put("loginAccount", all["login_account"] as? String ?: "")
-            put("loginPassword", SecretVault.decrypt(all["login_password"] as? String ?: ""))
+            // 不写登录密码：备份只搬运「连到哪、用哪个账号」，不搬运钥匙。
             put("allowSelfSigned", all["allow_self_signed"] as? Boolean ?: true)
         })
 
         data.put(BackupSection.NETWORK.key, JSONObject().apply {
             // 容器整体已加密，这里放明文 JSON；导入时再用本机 Keystore 加密落盘。
-            put("connections", SecretVault.decrypt(all["connections"] as? String ?: "[]"))
+            // 但每条连接都剔除 password：备份落在网盘/另一台设备上时，
+            // 不该把一批服务器密码集中到一个「口令保护」的文件里。
+            put("connections", stripConnectionPasswords(
+                SecretVault.decrypt(all["connections"] as? String ?: "[]")
+            ))
         })
 
         data.put(BackupSection.THEME.key, JSONObject().apply { THEME_KEYS.forEach { putAny(it, all) } })
@@ -247,6 +273,41 @@ object ConfigBackup {
             put("data", data)
         }.toString()
     }
+
+    /**
+     * 这份备份里是否含密码（旧格式会含）。
+     *
+     * 云同步覆盖前会把旧文件存成 `.prev` 当回滚点；若旧文件含密码，就不该再复制一份
+     * 到云端。解密失败按「含密码」处理——宁可少一个回滚点，也不多留一份钥匙。
+     */
+    fun containsPasswords(bytes: ByteArray, password: CharArray): Boolean = try {
+        val json = JSONObject(String(BackupCrypto.decrypt(bytes, password), Charsets.UTF_8))
+        val data = json.optJSONObject("data")
+        if (data == null) {
+            false
+        } else {
+            val synoHas = data.optJSONObject("syno")?.optString("loginPassword").orEmpty().isNotBlank()
+            val conns = data.optJSONObject("network")?.optString("connections").orEmpty()
+            synoHas || (conns.isNotBlank() && conns.contains("\"password\""))
+        }
+    } catch (e: Exception) {
+        true
+    }
+
+    /** 把连接列表 JSON 里每一条的 `password` 去掉，其余字段原样保留。 */
+    internal fun stripConnectionPasswords(raw: String): String = runCatching {
+        val arr = JSONArray(raw)
+        for (i in 0 until arr.length()) {
+            arr.optJSONObject(i)?.remove("password")
+        }
+        arr.toString()
+    }.getOrDefault("[]")
+
+    /** 统计有多少条连接没有密码（恢复后需要用户补一次）。 */
+    private fun countPasswordlessConnections(raw: String): Int = runCatching {
+        val arr = JSONArray(raw)
+        (0 until arr.length()).count { arr.optJSONObject(it)?.optString("password").isNullOrBlank() }
+    }.getOrDefault(0)
 
     private fun JSONObject.putAny(key: String, all: Map<String, *>) {
         when (val value = all[key]) {

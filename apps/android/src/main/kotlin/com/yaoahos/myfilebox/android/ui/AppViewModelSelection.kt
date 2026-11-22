@@ -337,7 +337,7 @@ internal fun AppViewModel.favoriteSynoSelected() {
             }
             val next = state.prefs.favorites.toMutableSet()
             items.forEach { file ->
-                if (allFavorited) next.remove(favoriteKey(file)) else next.add(favoriteKey(file))
+                if (allFavorited) next.removeAll(favoriteKeysOf(file)) else next.add(favoriteKey(file))
             }
             // 服务器上的收藏集合同步更新，否则刚点完星标要等下一次进收藏页才亮。
             val folderPaths = if (state.synoFavoriteSupported) folders.map { it.path.trimEnd('/') } else emptyList()
@@ -855,7 +855,7 @@ internal fun AppViewModel.uploadLocalFolderToCurrent(dirPath: String) {
 
 
 internal fun AppViewModel.unfavorite(file: FileEntry) {
-        val keys = setOf(file.id, favoriteKey(file), "folder:${file.path}")
+        val keys = favoriteKeysOf(file)
         val path = file.path.trimEnd('/')
         val synoFolder = state.browser?.ctx == FileContext.SYNO && file.isFolder && path.isNotBlank()
 
@@ -886,7 +886,7 @@ internal fun AppViewModel.unfavorite(file: FileEntry) {
 internal fun AppViewModel.unfavoriteSelected() {
         val items = selectedItems()
         if (items.isEmpty()) return
-        val removed = items.flatMap { setOf(it.id, favoriteKey(it), "folder:${it.path}") }.toSet()
+        val removed = items.flatMap { favoriteKeysOf(it) }.toSet()
         val folders = items.filter { it.isFolder && it.path.isNotBlank() }
         val syno = state.browser?.ctx == FileContext.SYNO && state.synoFavoriteSupported
 

@@ -31,9 +31,9 @@ keystore.properties
 __pycache__/
 *.pyc
 
-# ---- 开发期脚本与截图 ----
+# ---- 开发期脚本 ----
 tools/
-docs/screenshots/
+# docs/screenshots/ 存放 README 的界面预览图，随仓库发布
 
 # ---- 更新日志规范（本地写作参考，不随版本发布） ----
 /changelog-spec.md

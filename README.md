@@ -4,14 +4,26 @@ MyFileBox 是一个面向群晖 NAS 用户的文件管理客户端。当前提�
 
 - 项目名：`MyFileBox`
 - 包名：`com.yaoahos.myfilebox`
-- 当前版本：`1.1.1`（versionCode 3）
+- 当前版本：`1.1.2`（versionCode 4）
 - 最低系统：Android 8.0（API 26）
 - 编译 / 目标 SDK：Android 15（API 35）
-- 最新发布资产：`MyFileBox-1.1.1-release.apk` · 3,325,593 字节
-- SHA-256：`83b54f0abe2229cc459f104a666ec72036bd5ab4f8845210f69dcbadc2e8249a`（对应 1.1.1）
+- 最新发布资产：`MyFileBox-1.1.2-release.apk` · 3,341,805 字节
+- SHA-256：`243d1eaf254d4ab3a0f999bb2b9c60a599bab9ba72a40ce96a56cd70df8155ed`（对应 1.1.2）
 - 发布下载：[Releases](https://github.com/yaoahos/MyFileBox/releases)
 
 > MyFileBox 为独立开发的第三方客户端，与相关品牌厂商均无关联。
+
+* * *
+
+## 界面预览
+
+| 本地文件 | 群晖登录 | 网络位置 |
+| :---: | :---: | :---: |
+| ![本地文件](docs/screenshots/01-local.jpg) | ![群晖登录](docs/screenshots/02-syno-login.jpg) | ![网络位置](docs/screenshots/03-network.jpg) |
+
+| 设置 | 主题与外观 | 备份与同步 |
+| :---: | :---: | :---: |
+| ![设置](docs/screenshots/04-settings.jpg) | ![主题与外观](docs/screenshots/05-theme.jpg) | ![备份与同步](docs/screenshots/06-backup-sync.jpg) |
 
 * * *
 
@@ -79,6 +91,7 @@ MyFileBox 面向同时拥有手机本地文件与 NAS / 网络存储的用户。
 - 覆盖 8 类设置：群晖登录、网络位置、主题与外观、本地文件、文件分类与排序、底栏与启动、下载与缓存、更新检查。
 - 自动同步默认每天一次，也可选关闭 / 每 6 小时 / 每 7 天，或随时手动上传与恢复。
 - 备份文件由配置密码派生的密钥加密，应用不保存该密码，丢失后不可解密。
+- 出于安全考虑，备份只保存地址、账号与路径，**不含任何密码**；恢复后首次连接需重新输入。
 
 **筛选**
 
@@ -203,6 +216,12 @@ MyFileBox/                                  仓库根目录
 * * *
 
 ## 七、版本记录
+
+**2026/11/22 · 1.1.2**
+- 新增：群晖连接可删除，同时清除本机保存的地址、账号与密码
+- 优化：备份与云同步不再包含密码，恢复后需重新输入
+- 修复：从收藏页进入文件夹后删除或刷新，列表跳回收藏首页
+- 修复：网络连接测试结果要手动上滑才看得到
 
 **2026/11/21 · 1.1.1**
 - 新增：详情与回收站地址支持点击复制，弹窗内提示「已复制」

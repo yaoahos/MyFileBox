@@ -17,8 +17,10 @@ import com.yaoahos.myfilebox.android.TransferCancellation
 import com.yaoahos.myfilebox.android.TransferNotifications
 import com.yaoahos.myfilebox.android.TransferService
 import com.yaoahos.myfilebox.android.data.BackupCrypto
+import com.yaoahos.myfilebox.android.data.ApplyResult
 import com.yaoahos.myfilebox.android.data.BackupCryptoException
 import com.yaoahos.myfilebox.android.data.BackupError
+import com.yaoahos.myfilebox.android.data.BackupInfo
 import com.yaoahos.myfilebox.android.data.CloudConfigFile
 import com.yaoahos.myfilebox.android.data.ConfigBackup
 import com.yaoahos.myfilebox.android.data.ConfigCloudSync
@@ -276,6 +278,38 @@ internal fun AppViewModel.refreshNetTab() {
 internal fun AppViewModel.refreshBrowser() {
         val browser = state.browser ?: return refresh()
         detectNetworkSwitchNow()
+        // 收藏页不是真实目录：它的 location 要么是存储根、要么是「收藏」这种假路径。
+        // 以前下拉会落到下面的正常分支——本地把收藏列表刷成「内部存储」根目录、群晖只刷了
+        // 共享首页——用户看到的就是「退出了收藏，还多出一堆不相干条目」。这里按收藏集重算。
+        if (browser.favorites) {
+            val token = beginPull()
+            val started = System.currentTimeMillis()
+            viewModelScope.launch {
+                var outcome: String? = "已刷新"
+                try {
+                    when (browser.ctx) {
+                        FileContext.LOCAL -> {
+                            val fresh = sortFiles(favoriteFiles(FileContext.LOCAL))
+                            // 期间可能已离开收藏页或切了端：只回写同一页。
+                            if (state.browser?.favorites == true && state.browser?.ctx == FileContext.LOCAL) {
+                                state = state.copy(browser = state.browser?.copy(items = fresh))
+                            }
+                        }
+                        FileContext.SYNO -> {
+                            // 等解析完成再收圈，否则「已刷新」会先于列表更新出现。
+                            resolveSynoFavorites()
+                            // 解析失败时 dsm.lastError 有值：保留原因，别用「已刷新」盖掉。
+                            outcome = dsm.lastError?.takeIf { it.isNotBlank() } ?: "已刷新"
+                        }
+                        FileContext.NET -> Unit
+                    }
+                } finally {
+                    endPull(token, outcome)
+                    logPull("favorites", started)
+                }
+            }
+            return
+        }
         // 分类页的内容就是从全量快照算出来的：这里必须等扫描，不能只刷根目录一层。
         if (browser.localCategory != null) {
             refreshLocal(beginPull())
@@ -669,8 +703,7 @@ internal fun AppViewModel.syncRestoreFrom(
                 }
             }.onSuccess { (info, applied) ->
                 applyRestoredPrefs()
-                val when_ = if (info.exportedAt > 0) "（备份于 ${formatSyncTime(info.exportedAt)}）" else ""
-                state = state.copy(backupBusy = false, message = "已恢复 ${applied.size} 类配置$when_")
+                state = state.copy(backupBusy = false, message = restoreMessage(info, applied))
                 onResult(true, "")
             }.onFailure { e ->
                 // 弹窗还开着：错误只回给弹窗自己显示，写进 state.message 会被弹窗窗口挡住。
@@ -817,8 +850,7 @@ internal fun AppViewModel.restoreFromLocal(
             state = state.copy(backupBusy = false)
             outcome.onSuccess { (info, applied) ->
                 applyRestoredPrefs()
-                val when_ = if (info.exportedAt > 0) "（备份于 ${formatSyncTime(info.exportedAt)}）" else ""
-                state = state.copy(message = "已恢复 ${applied.size} 类配置$when_")
+                state = state.copy(message = restoreMessage(info, applied))
                 onResult(true, "")
             }.onFailure { e ->
                 // 错误只在弹窗内显示；顶部提示会被 AlertDialog 的独立窗口盖住。
@@ -827,6 +859,18 @@ internal fun AppViewModel.restoreFromLocal(
                 onResult(false, err)
             }
         }
+    }
+
+
+    /**
+     * 恢复成功的提示：几类配置 + 备份时间；新版备份不含密码，
+     * 缺钥匙的条目要点名，用户才知道接下来要补什么。
+     */
+private fun restoreMessage(info: BackupInfo, applied: ApplyResult): String {
+        val when_ = if (info.exportedAt > 0) "（备份于 ${formatSyncTime(info.exportedAt)}）" else ""
+        val needPassword = applied.connectionsNeedingPassword + if (applied.synoPasswordMissing) 1 else 0
+        val tail = if (needPassword > 0) "，$needPassword 项需重新输入密码" else ""
+        return "已恢复 ${applied.sections.size} 类配置$when_$tail"
     }
 
 

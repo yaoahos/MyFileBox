@@ -95,6 +95,35 @@ class ConfigBackupPayloadTest {
     }
 
     @Test
+    fun `载荷不含任何密码`() {
+        // 安全约定：备份落在网盘或另一台设备上时，不能把一批密码集中放进
+        // 一个只由「8 位口令」保护的文件里。群晖登录密码与每条连接的密码都不导出。
+        val withSecrets = sample + mapOf(
+            "login_password" to "syno-secret",
+            "connections" to """[{"id":"a","name":"NAS","host":"h","username":"u","password":"conn-secret"}]"""
+        )
+        val data = payloadOf(withSecrets).getJSONObject("data")
+        val syno = data.getJSONObject("syno")
+        assertTrue("群晖分区不应包含登录密码", !syno.has("loginPassword"))
+        val connections = data.getJSONObject("network").getString("connections")
+        assertTrue("连接里不应出现密码字段", !connections.contains("password"))
+        assertTrue("连接里不应出现密码值", !connections.contains("conn-secret"))
+        assertTrue("地址等非敏感字段仍应保留", connections.contains("\"host\":\"h\""))
+    }
+
+    @Test
+    fun `剥离密码后仍保留连接的其他字段`() {
+        val raw = """[{"id":"a","name":"NAS","host":"10.0.0.5","port":445,"username":"u","password":"p","secure":true}]"""
+        val out = ConfigBackup.stripConnectionPasswords(raw)
+        val o = org.json.JSONArray(out).getJSONObject(0)
+        assertEquals("a", o.getString("id"))
+        assertEquals(445, o.getInt("port"))
+        assertEquals("u", o.getString("username"))
+        assertTrue("password 应被移除", !o.has("password"))
+        assertTrue(o.getBoolean("secure"))
+    }
+
+    @Test
     fun `文件名带时间戳且可识别`() {
         val name = ConfigBackup.suggestedFileName(1_700_000_000_000L)
         assertTrue(name.startsWith("MyFileBox-config-"))

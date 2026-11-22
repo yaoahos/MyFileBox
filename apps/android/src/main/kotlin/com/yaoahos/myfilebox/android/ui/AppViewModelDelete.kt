@@ -313,6 +313,18 @@ internal fun AppViewModel.deleteFiles(
                 } else "删除失败"
             )
             if (ok) {
+                // 删掉的条目不能继续留在收藏里：收藏页是按 favorites 集合重算的快照，
+                // 集合里留着 key，刷新/重进后已删条目又会被解析回来（群晖侧尤其明显）。
+                val gonePaths = items.map { it.path.trimEnd('/') }.filter { it.isNotBlank() }.toSet()
+                val gone = items.flatMap { favoriteKeysOf(it) }.toSet() + gonePaths
+                if (gone.any { it in state.prefs.favorites } || gonePaths.any { it in state.synoFavoritePaths }) {
+                    state = state.copy(
+                        prefs = state.prefs.copy(favorites = state.prefs.favorites - gone),
+                        synoFavorites = state.synoFavorites.filter { favoriteKey(it) !in gone },
+                        synoFavoritePaths = state.synoFavoritePaths - gonePaths
+                    )
+                    persist()
+                }
                 if (ctx == FileContext.LOCAL) {
                     // 增量更新瞬时生效（清单 14/20）；分类页由 applyLocalDelta→refreshLocal 重算，
                     // 不再闪现根目录（清单 1）。

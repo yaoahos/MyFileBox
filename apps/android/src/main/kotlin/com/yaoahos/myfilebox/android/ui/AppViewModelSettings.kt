@@ -488,6 +488,40 @@ internal fun AppViewModel.logout() {
     }
 
 
+/**
+ * 彻底删除群晖连接：会话、保存的服务器 / 账号 / 密码一起清掉。
+ *
+ * 与 [logout] 的区别是「退出登录」只结束会话、密码留着方便下次登录；而删连接意味着
+ * 这台 NAS 不想再用了（换设备、卖机器、只是想清掉保存的凭据），必须连凭据一起清。
+ */
+internal fun AppViewModel.deleteSynoConnection() {
+        state = state.copy(
+            session = null,
+            shares = emptyList(),
+            volumes = emptyList(),
+            browser = null,
+            browserStack = emptyList(),
+            screen = Screen.MAIN,
+            screenStack = emptyList(),
+            tab = TabKey.SYNO,
+            search = null,
+            editSynoOpen = false,
+            searchIndexNet = emptyMap(),
+            message = "已删除群晖连接"
+        )
+        // 凭据都清了，自动登录抑制也没意义（没有可登录的东西），恢复默认。
+        autoLoginSuppressed = false
+        rememberSession = true
+        prefsStore.edit()
+            .remove("login_server")
+            .remove("login_account")
+            .remove("login_password")
+            .putBoolean("auto_login_suppressed", false)
+            .apply()
+        persist()
+    }
+
+
 internal fun AppViewModel.editConnection(server: String, account: String, password: String = "") {
         val current = state.session ?: return
         if (server.isBlank() || account.isBlank()) {

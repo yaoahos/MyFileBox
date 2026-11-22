@@ -174,7 +174,7 @@ fun BackupSyncScreen(state: MyFileBoxState, vm: AppViewModel) {
                             Text("正在处理…", fontSize = 12.sp, color = MutedText, modifier = Modifier.padding(start = 10.dp))
                         }
                     }
-                    Hint("备份 8 类设置，不含文件内容；以 AES-256-GCM 加密，密码丢失即无法解密。")
+                    Hint("备份 8 类设置，不含文件与密码；以 AES-256-GCM 加密，密码丢失即无法解密。")
                 }
             }
 
@@ -322,7 +322,8 @@ fun BackupSyncScreen(state: MyFileBoxState, vm: AppViewModel) {
     importBytes?.let { bytes ->
         PasswordDialog(
             title = "输入配置密码",
-            hint = "输入密码后点「恢复」，将用「$importName」覆盖本机 8 类设置；文件与缓存不受影响。",
+            hint = "输入密码后点「恢复」，将用「$importName」覆盖本机 8 类设置；文件与缓存不受影响。" +
+                "备份不含密码，恢复后连接需重新输入。",
             confirmLabel = "恢复",
             confirmTwice = false,
             error = importError,
@@ -811,8 +812,8 @@ private fun CloudRestoreDialog(
                             )
                         }
                         Text(
-                            "会用所选配置覆盖本机 8 类设置；文件与缓存不受影响。" +
-                                "密码错误或文件损坏都会给出具体原因。",
+                            "会用所选配置覆盖本机 8 类设置；文件与缓存不受影响，" +
+                                "备份不含密码、连接需重新输入；密码错误或文件损坏都会给出具体原因。",
                             fontSize = 11.sp,
                             color = MutedText,
                             lineHeight = 15.sp,

@@ -383,7 +383,17 @@ object ConfigCloudSync {
         // 只覆盖「自己这一份」：云端现在按设备分文件，别人的配置不会被这次上传动到。
         val previous = runCatching { dav.getBytes(connection, fileName) }.getOrNull()
         if (previous != null && BackupCrypto.isBackupFile(previous)) {
-            dav.putBytes(connection, fileName + ".prev", previous)
+            // 旧版备份可能含密码：这种文件不再复制成 `.prev`，并把云端已有的
+            // 含密码 `.prev` 顺手删掉。配置用途的回滚点不值得用一批密码来换。
+            val previousHasPasswords = ConfigBackup.containsPasswords(previous, cipher)
+            if (previousHasPasswords) {
+                runCatching {
+                    val prevUrl = dav.absoluteUrl(connection, fileName + ".prev")
+                    if (prevUrl.isNotBlank()) dav.delete(connection, listOf(prevUrl))
+                }
+            } else {
+                dav.putBytes(connection, fileName + ".prev", previous)
+            }
         }
         dav.clearError()
         val ok = dav.putBytes(connection, fileName, bytes)

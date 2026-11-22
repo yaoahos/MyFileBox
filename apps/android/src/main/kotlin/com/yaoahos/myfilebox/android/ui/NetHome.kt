@@ -18,6 +18,7 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
@@ -543,10 +544,16 @@ private fun AddNetworkDialog(
     // 于是按钮也跟着重排：取消 / 保存留在标题行随时可点，测试 / 删除挪进内容区，
     // 谁都不会被键盘或手势条吃掉。
     val saveInteraction = remember { MutableInteractionSource() }
+    // 测试结果固定在内容区下方，不随表单滚动：放进滚动区末尾时，只要键盘一弹
+    // 或字段稍多，它就落到可视区外（曾经只剩一条缝），用户还得自己往上推。
+    val resultText = if (testing) "正在测试…" else testResult.orEmpty()
+    val footerContent: (@Composable ColumnScope.() -> Unit)? =
+        if (resultText.isBlank()) null else { { TestResultBanner(resultText, testing, testResult) } }
     FormDialog(
         title = if (initial == null) "添加网络位置" else "编辑网络连接",
         onDismiss = onDismiss,
         spacing = 8.dp,
+        footer = footerContent,
         confirmButton = {
             Button(
                 onClick = {
@@ -721,35 +728,40 @@ private fun AddNetworkDialog(
                     )
                 }
             }
-            // 测试结果：高度按内容走（上限约 5 行，超出可滚动），不再固定 40dp 把长报错裁掉。
-            val resultText = if (testing) "正在测试…" else testResult.orEmpty()
-            if (resultText.isNotBlank()) {
-                val accent = when {
-                    testing -> MutedText
-                    testResult?.startsWith("连接可用") == true -> semanticColors().online
-                    else -> MaterialTheme.colorScheme.error
-                }
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .padding(top = 10.dp)
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(accent.copy(alpha = 0.08f))
-                        .padding(horizontal = 10.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.Top
-                ) {
-                    Text(
-                        resultText,
-                        fontSize = 12.sp,
-                        lineHeight = 17.sp,
-                        color = accent,
-                        modifier = Modifier
-                            .weight(1f)
-                            .heightIn(max = 90.dp)
-                            .verticalScroll(rememberScrollState())
-                    )
-                }
-            }
+    }
+}
+
+/**
+ * 连接测试结果条：绿=可用，红=失败，长报错最多 5 行（超出自身可滚动）。
+ *
+ * 由 [FormDialog] 的 footer 承载，固定在内容区下方，不随表单滚动。
+ */
+@Composable
+private fun TestResultBanner(text: String, testing: Boolean, raw: String?) {
+    val accent = when {
+        testing -> MutedText
+        raw?.startsWith("连接可用") == true -> semanticColors().online
+        else -> MaterialTheme.colorScheme.error
+    }
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(top = 10.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .background(accent.copy(alpha = 0.08f))
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.Top
+    ) {
+        Text(
+            text,
+            fontSize = 12.sp,
+            lineHeight = 17.sp,
+            color = accent,
+            modifier = Modifier
+                .weight(1f)
+                .heightIn(max = 90.dp)
+                .verticalScroll(rememberScrollState())
+        )
     }
 }
 

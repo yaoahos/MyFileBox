@@ -161,6 +161,7 @@ import com.yaoahos.myfilebox.android.ui.theme.semanticColors
 @Composable
 internal fun SynoHome(state: MyFileBoxState, vm: AppViewModel, onVolume: () -> Unit) {
     var showAccount by remember { mutableStateOf(false) }
+    var confirmDeleteSyno by remember { mutableStateOf(false) }
     val sharesByKey = state.shares.associateBy { it.key }
     val modules = state.prefs.moduleOrder
         .filter { it.startsWith("syno:") && vm.moduleVisible(it) }
@@ -280,8 +281,35 @@ internal fun SynoHome(state: MyFileBoxState, vm: AppViewModel, onVolume: () -> U
                     showAccount = false
                     vm.logout()
                 }, danger = true)
+                // 退出登录会把密码留着方便下次登录；不想再用这台 NAS、或者只想清掉
+                // 保存在本机的凭据时，得有「删除连接」这条路（原来没有，只能一直留着）。
+                FolderSheetAction(Icons.Outlined.Delete, "删除连接", onClick = {
+                    showAccount = false
+                    confirmDeleteSyno = true
+                }, danger = true)
             }
         }
+    }
+    if (confirmDeleteSyno) {
+        AlertDialog(
+            onDismissRequest = { confirmDeleteSyno = false },
+            title = { Text("删除群晖连接", fontWeight = FontWeight.Bold) },
+            text = {
+                Text(
+                    "将清除本机保存的服务器地址、账号与密码，不会影响群晖上的文件。\n" +
+                        "之后需要重新输入完整连接信息才能登录。"
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmDeleteSyno = false
+                    vm.deleteSynoConnection()
+                }) { Text("删除", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmDeleteSyno = false }) { Text("取消") }
+            }
+        )
     }
 }
 

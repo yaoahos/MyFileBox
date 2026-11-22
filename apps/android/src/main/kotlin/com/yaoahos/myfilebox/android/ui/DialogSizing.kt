@@ -84,22 +84,37 @@ fun FormDialog(
     modifier: Modifier = Modifier,
     spacing: Dp = 0.dp,
     dismissButton: @Composable () -> Unit = { TextButton(onClick = onDismiss) { Text("取消") } },
+    /**
+     * 固定在内容区下方的区域（不随内容滚动）。用于「测试结果」这类出现后必须
+     * 立刻看到、又不能把表单顶走的反馈——放进滚动区里，键盘一弹就只剩一条缝。
+     */
+    footer: (@Composable ColumnScope.() -> Unit)? = null,
     content: @Composable ColumnScope.() -> Unit
 ) {
     val config = LocalConfiguration.current
     val compact = config.screenHeightDp < COMPACT_SCREEN_HEIGHT_DP
+    // 有固定区时把内容区上限让出它的位置，否则两者相加会顶出可视范围
+    // （小屏 + 键盘时尤其明显，底部按钮会被挤到屏幕外）。
+    val contentMaxHeight = (rememberDialogContentMaxHeight() - if (footer != null) 96.dp else 0.dp)
+        .coerceAtLeast(80.dp)
     if (!compact) {
         AlertDialog(
             onDismissRequest = onDismiss,
             modifier = modifier,
             title = { Text(title, fontWeight = FontWeight.Bold) },
             text = {
-                Column(
-                    Modifier
-                        .heightIn(max = rememberDialogContentMaxHeight())
-                        .verticalScroll(rememberScrollState()),
-                    verticalArrangement = Arrangement.spacedBy(spacing)
-                ) { content() }
+                Column {
+                    Column(
+                        Modifier
+                            .heightIn(max = contentMaxHeight)
+                            .verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(spacing)
+                    ) { content() }
+                    // 固定区不进滚动：滚到哪它都在，键盘弹出也贴着按钮。
+                    footer?.let {
+                        Column(Modifier.fillMaxWidth().heightIn(max = 120.dp)) { it() }
+                    }
+                }
             },
             confirmButton = confirmButton,
             dismissButton = dismissButton
@@ -144,13 +159,18 @@ fun FormDialog(
                 dismissButton()
                 confirmButton()
             }
-            Column(
-                Modifier
-                    .heightIn(max = rememberDialogContentMaxHeight())
-                    .verticalScroll(rememberScrollState())
-                    .padding(top = 10.dp),
-                verticalArrangement = Arrangement.spacedBy(spacing)
-            ) { content() }
+            Column(Modifier.fillMaxWidth()) {
+                Column(
+                    Modifier
+                        .heightIn(max = contentMaxHeight)
+                        .verticalScroll(rememberScrollState())
+                        .padding(top = 10.dp),
+                    verticalArrangement = Arrangement.spacedBy(spacing)
+                ) { content() }
+                footer?.let {
+                    Column(Modifier.fillMaxWidth().heightIn(max = 120.dp).padding(top = 8.dp)) { it() }
+                }
+            }
         }
     }
 }

@@ -730,7 +730,11 @@ internal fun AppViewModel.openFolder(entry: FileEntry) {
             FileContext.SYNO -> {
                 val previous = state.browser
                 val previousStack = state.browserStack
-                pushBrowser(browser.copy(title = entry.name, path = "${browser.path} / ${entry.name}", items = emptyList(), location = entry.path))
+                // 进的是真实目录：必须摘掉 favorites 标记。收藏页是「集合快照」，
+                // 带着它进子目录会出两处错：删除/刷新走 reloadBrowserItems 的收藏分支，
+                // 把列表换回收藏首页内容（看起来像多出同名文件夹、又像退出当前路径）；
+                // browserIsVirtual() 也会把子目录当虚拟页，粘贴与新建被禁用。
+                pushBrowser(browser.copy(title = entry.name, path = "${browser.path} / ${entry.name}", items = emptyList(), location = entry.path, favorites = false))
                 // 点目录这一刻先查一次网络：系统回调常常迟到，不该让用户先对着空白页等。
                 detectNetworkSwitchNow()
                 // 端点还指着刚离开的局域网时，接下来必然要先重建通道（命中中继缓存 1~2 秒，
@@ -810,7 +814,8 @@ internal fun AppViewModel.openFolder(entry: FileEntry) {
                 val connection = state.connections.firstOrNull { it.id == browser.netId } ?: return
                 val previous = state.browser
                 val previousStack = state.browserStack
-                pushBrowser(browser.copy(title = entry.name, path = "${browser.path} / ${entry.name}", items = emptyList(), location = entry.path))
+                // 同群晖：真实目录不能继承收藏页的虚拟标记。
+                pushBrowser(browser.copy(title = entry.name, path = "${browser.path} / ${entry.name}", items = emptyList(), location = entry.path, favorites = false))
                 state = state.copy(loading = true, connectHint = false)
                 detectNetworkSwitchNow()
                 armNetTimeoutHint(entry.path)
@@ -1369,21 +1374,40 @@ internal fun AppViewModel.setViewMode(tab: TabKey, mode: String) {
 internal fun AppViewModel.favoriteKey(file: FileEntry): String = if (file.path.isNotBlank()) file.path else file.id
 
 
+/**
+ * 一个条目在收藏集合里可能占用的全部 key。
+ *
+ * 本地文件夹历史上存在两种写法：从「更多 → 收藏」写的是裸路径，首页文件夹卡片用的是
+ * `folder:` 前缀。写入只认一种、删除却要两种都清，否则「取消收藏」只删掉其中一条，
+ * 另一条还留着 → 收藏页刷新后又冒出来。
+ */
+internal fun AppViewModel.favoriteKeysOf(file: FileEntry): Set<String> = setOf(
+    file.id,
+    favoriteKey(file),
+    "folder:${file.path.trimEnd('/')}"
+)
+
+
 internal fun AppViewModel.isFavorite(file: FileEntry): Boolean {
         val key = favoriteKey(file)
         if (key in state.prefs.favorites) return true
-        // 群晖一侧还要认服务器自己的收藏列表：在 DSM 网页或另一台设备收藏过的文件夹，
-        // 本机没有记录，只看本地就会当成「未收藏」，再点收藏必然撞 800。
         val synoCtx = state.browser?.ctx == FileContext.SYNO ||
             (state.browser == null && state.tab == TabKey.SYNO)
+        // 本地文件夹还有 `folder:` 前缀这条写法（首页文件夹卡片用的），两套都要认，
+        // 否则同一只文件夹在这里显示「已收藏」、在首页卡片上还算「未收藏」。
+        if (!synoCtx && file.isFolder && "folder:${file.path.trimEnd('/')}" in state.prefs.favorites) {
+            return true
+        }
+        // 群晖一侧还要认服务器自己的收藏列表：在 DSM 网页或另一台设备收藏过的文件夹，
+        // 本机没有记录，只看本地就会当成「未收藏」，再点收藏必然撞 800。
         return synoCtx && key in state.synoFavoritePaths
     }
 
 
 internal fun AppViewModel.toggleFavorite(file: FileEntry) {
         val key = favoriteKey(file)
-        val nowFav = key !in state.prefs.favorites
-        val next = if (nowFav) state.prefs.favorites + key else state.prefs.favorites - key
+        val nowFav = !isFavorite(file)
+        val next = if (nowFav) state.prefs.favorites + key else state.prefs.favorites - favoriteKeysOf(file)
         state = state.copy(
             prefs = state.prefs.copy(favorites = next),
             message = if (nowFav) "已收藏「${file.name}」" else "已取消收藏「${file.name}」"
@@ -1432,7 +1456,14 @@ internal fun AppViewModel.favoriteFiles(ctx: FileContext = FileContext.LOCAL): L
             // 本地收藏只包含本地文件（清单 5）。
             FileContext.LOCAL -> {
                 val folders = state.localFolders
-                    .filter { favoriteFolderKey(it) in keys }
+                    // 文件夹有两套 key 写法（裸路径 / folder: 前缀），两套都认，否则
+                    // 从「更多 → 收藏」加进来的文件夹在收藏页看不到（首页计数也跟着少）。
+                    .filter { folder ->
+                        val entry = folderEntry(folder)
+                        favoriteFolderKey(folder) in keys ||
+                            favoriteKey(entry) in keys ||
+                            entry.path.trimEnd('/') in keys
+                    }
                     .map { folderEntry(it) }
                 folders + state.localFiles.filter { favoriteKey(it) in keys }
             }
@@ -1455,55 +1486,62 @@ internal fun AppViewModel.favoriteFiles(ctx: FileContext = FileContext.LOCAL): L
      * 这样深层路径和文件都能显示（shares.items 只覆盖已加载的浅层项）。
      */
 internal fun AppViewModel.refreshSynoFavorites() {
+        viewModelScope.launch { resolveSynoFavorites() }
+    }
+
+
+    /**
+     * [refreshSynoFavorites] 的可等待版本：下拉刷新要等解析完再收圈，
+     * 否则「已刷新」会先于列表更新出现。
+     */
+internal suspend fun AppViewModel.resolveSynoFavorites() {
         val session = state.session ?: return
         val root = state.localRoot.trimEnd('/')
         val keys = state.prefs.favorites.filter {
             !it.startsWith("folder:") && !it.startsWith("net:") && !it.startsWith(root)
         }
-        viewModelScope.launch {
-            // 先拿服务器上的真实收藏：本机记录之外的收藏也能列出来，
-            // 同时让「已收藏」的判断与服务端一致（不再出现点收藏回 800 的情况）。
-            val serverPaths = withContext(Dispatchers.IO) { dsm.listFavoritePaths(session) }
-            // 本机收藏与服务器收藏会有重叠（本应用加的文件夹两边都记着），
-            // 列表直接相加会让同一文件夹出现两次、还多一次 dsm.list 请求。
-            val all = (keys.toSet() + (serverPaths ?: state.synoFavoritePaths)).toList()
-            val resolved = withContext(Dispatchers.IO) {
-                all.mapNotNull { path ->
-                    val parent = path.substringBeforeLast('/', "")
-                    val name = path.substringAfterLast('/')
-                    if (parent.isBlank() || name.isBlank()) return@mapNotNull null
-                    runCatching { dsm.list(session, parent) }.getOrDefault(emptyList())
-                        .firstOrNull { it.name == name }
-                }.distinctBy { favoriteKey(it) }
-                // distinctBy 兜底：收藏列表页用 LazyColumn(key = id)，同一条目出现两次会
-                // 抛「Key was already used」直接闪退。本机与服务器收藏重叠时尤其容易触发。
-            }
-            // 本机记着、服务器上没有的文件夹收藏，补传上去。
-            //
-            // 官方收藏只收文件夹（文件只能留在本机），所以这里只补文件夹；
-            // 不做这一步的话，早先版本加过的收藏永远只存在这台设备上，
-            // 另一台平板登录同一个账号自然看不到。补传是幂等的：服务器已经有了会回 800，
-            // setFavorite 内部按「已收藏」处理，不会报错。
-            val server = serverPaths ?: state.synoFavoritePaths
-            val missing = resolved
-                .filter { it.isFolder && it.path.isNotBlank() }
-                .filter { it.path.trimEnd('/') !in server }
-                .map { it.path.trimEnd('/') }
-                .take(40)
-            val pushed = if (serverPaths != null && missing.isNotEmpty()) {
-                val ok = withContext(Dispatchers.IO) { dsm.setFavorite(session, missing, true) }
-                if (ok) missing else emptyList()
-            } else emptyList()
-
-            state = state.copy(
-                synoFavorites = resolved,
-                synoFavoritePaths = server + pushed,
-                // 收藏页是打开时的快照：解析完成后同步刷新，否则新收藏看不到。
-                browser = if (state.browser?.favorites == true) {
-                    state.browser?.copy(items = resolved)
-                } else state.browser
-            )
+        // 先拿服务器上的真实收藏：本机记录之外的收藏也能列出来，
+        // 同时让「已收藏」的判断与服务端一致（不再出现点收藏回 800 的情况）。
+        val serverPaths = withContext(Dispatchers.IO) { dsm.listFavoritePaths(session) }
+        // 本机收藏与服务器收藏会有重叠（本应用加的文件夹两边都记着），
+        // 列表直接相加会让同一文件夹出现两次、还多一次 dsm.list 请求。
+        val all = (keys.toSet() + (serverPaths ?: state.synoFavoritePaths)).toList()
+        val resolved = withContext(Dispatchers.IO) {
+            all.mapNotNull { path ->
+                val parent = path.substringBeforeLast('/', "")
+                val name = path.substringAfterLast('/')
+                if (parent.isBlank() || name.isBlank()) return@mapNotNull null
+                runCatching { dsm.list(session, parent) }.getOrDefault(emptyList())
+                    .firstOrNull { it.name == name }
+            }.distinctBy { favoriteKey(it) }
+            // distinctBy 兜底：收藏列表页用 LazyColumn(key = id)，同一条目出现两次会
+            // 抛「Key was already used」直接闪退。本机与服务器收藏重叠时尤其容易触发。
         }
+        // 本机记着、服务器上没有的文件夹收藏，补传上去。
+        //
+        // 官方收藏只收文件夹（文件只能留在本机），所以这里只补文件夹；
+        // 不做这一步的话，早先版本加过的收藏永远只存在这台设备上，
+        // 另一台平板登录同一个账号自然看不到。补传是幂等的：服务器已经有了会回 800，
+        // setFavorite 内部按「已收藏」处理，不会报错。
+        val server = serverPaths ?: state.synoFavoritePaths
+        val missing = resolved
+            .filter { it.isFolder && it.path.isNotBlank() }
+            .filter { it.path.trimEnd('/') !in server }
+            .map { it.path.trimEnd('/') }
+            .take(40)
+        val pushed = if (serverPaths != null && missing.isNotEmpty()) {
+            val ok = withContext(Dispatchers.IO) { dsm.setFavorite(session, missing, true) }
+            if (ok) missing else emptyList()
+        } else emptyList()
+
+        state = state.copy(
+            synoFavorites = resolved,
+            synoFavoritePaths = server + pushed,
+            // 收藏页是打开时的快照：解析完成后同步刷新，否则新收藏看不到。
+            browser = if (state.browser?.favorites == true) {
+                state.browser?.copy(items = resolved)
+            } else state.browser
+        )
     }
 
 
