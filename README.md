@@ -4,11 +4,11 @@ MyFileBox 是一个面向群晖 NAS 用户的文件管理客户端。当前提�
 
 - 项目名：`MyFileBox`
 - 包名：`com.yaoahos.myfilebox`
-- 当前版本：`1.1.2`（versionCode 4）
+- 当前版本：`1.1.3`（versionCode 5）
 - 最低系统：Android 8.0（API 26）
 - 编译 / 目标 SDK：Android 15（API 35）
-- 最新发布资产：`MyFileBox-1.1.2-release.apk` · 3,341,805 字节
-- SHA-256：`243d1eaf254d4ab3a0f999bb2b9c60a599bab9ba72a40ce96a56cd70df8155ed`（对应 1.1.2）
+- 最新发布资产：`MyFileBox-1.1.3-release.apk` · 3,341,877 字节
+- SHA-256：`97460f9ea30ee8652d7ac56a090082113b270d0525fda423d213d62c8739734e`（对应 1.1.3）
 - 发布下载：[Releases](https://github.com/yaoahos/MyFileBox/releases)
 
 > MyFileBox 为独立开发的第三方客户端，与相关品牌厂商均无关联。
@@ -216,6 +216,10 @@ MyFileBox/                                  仓库根目录
 * * *
 
 ## 七、版本记录
+
+**2026/11/23 · 1.1.3**
+- 优化：更新日志内容较长时，底部渐隐提示上滑可查看剩余内容
+- 修复：群晖回收站按原目录层级展示，删除的文件不再越级出现在首页
 
 **2026/11/22 · 1.1.2**
 - 新增：群晖连接可删除，同时清除本机保存的地址、账号与密码

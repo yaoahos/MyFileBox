@@ -293,15 +293,40 @@ internal fun AppViewModel.backRecycleFolder() {
  */
 internal suspend fun AppViewModel.loadSynoRecycleSummary(): List<RecycleItem> {
         val session = state.session ?: return emptyList()
-        val items = dsm.listRecycleBin(
-            session,
-            state.shares.map { s -> s.path },
-            topLevelOnly = true,
-            tracked = synoRecycleIndex.all()
-        )
+        val shares = state.shares.map { s -> s.path }
+        // 用全量 tracked 验证（索引清理依赖它），展示时再隐藏深层的已删文件：
+        // 深层记录越级出现在汇总页，看起来就是「只有文件、没有目录结构」。
+        val all = synoRecycleIndex.all()
+        val items = dsm.listRecycleBin(session, shares, topLevelOnly = true, tracked = all)
         pruneSynoRecycleIndex(items)
-        return items
+        return visibleSummary(items, all, shares)
     }
+
+
+/**
+ * 汇总页展示过滤：位于 #recovery 更深层的「本应用删除记录」不越级列出，
+ * 用户逐层点进对应目录才看得到（那里由 loadSynoRecycleDir 直接列实况）。
+ *
+ * 第一层条目（含第一层的删除记录）正常显示；外部删除的条目本来就不在索引里，
+ * 不受影响。只按展示过滤，索引的验证/清理仍走全量结果。
+ */
+internal fun visibleSummary(
+    items: List<RecycleItem>,
+    tracked: List<RecycleItem>,
+    sharePaths: List<String>
+): List<RecycleItem> {
+    val roots = sharePaths.map { it.trimEnd('/') + "/#recycle" }
+    val units = tracked.associateBy { it.trashPath.trimEnd('/') }
+    return items.filter { item ->
+        val unit = units[item.trashPath.trimEnd('/')] ?: return@filter true
+        val path = item.trashPath.trimEnd('/')
+        roots.any { root ->
+            val rel = path.removePrefix("$root/").removePrefix(root).trimStart('/')
+            // 索引记录恰好在第一层才留在汇总页；更深层的收进对应目录里。
+            rel.isNotBlank() && !rel.contains('/')
+        }
+    }
+}
 
 
 /** 列 `#recycle` 的某一层；每个条目仍带「删除前在哪」，还原照旧按它走。 */

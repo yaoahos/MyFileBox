@@ -1428,6 +1428,8 @@ internal fun leafRecycleItems(items: List<RecycleItem>): List<RecycleItem> {
  * - 记录嵌套时只保留最外层单元（先删文件再删所在文件夹的场景）；
  * - 没有记录的条目（外部删除）退回 [leafRecycleItems] 规则兜底。
  */
+
+
 internal fun mergeTrackedRecycle(raw: List<RecycleItem>, tracked: List<RecycleItem>): List<RecycleItem> {
     val present = tracked
     val valid = present.filter { t ->
@@ -1441,11 +1443,13 @@ internal fun mergeTrackedRecycle(raw: List<RecycleItem>, tracked: List<RecycleIt
     val unitFolders = valid.filter { it.isFolder }.map { it.trashPath.trimEnd('/') }
     val untracked = raw.filter { item ->
         val p = item.trashPath.trimEnd('/')
-        // 单元自身、单元内部 → 归并进单元；
-        // 单元的祖先 → 只是中间层壳目录，不单列。
+        // 单元自身、单元内部 → 归并进单元。
+        // 祖先目录：只有「文件夹删除单元」的祖先才是纯中间层壳（文件夹本身能点进去，
+        // 壳再单列只会重复）；「文件删除单元」的祖先是进入原目录看其它被删项的入口，
+        // 必须保留——汇总层只列第一层，一旦丢掉就再也看不到上层完整目录。
         p !in unitPaths &&
             unitFolders.none { f -> p.startsWith("$f/") } &&
-            unitPaths.none { u -> u.startsWith("$p/") }
+            unitFolders.none { f -> f.startsWith("$p/") }
     }
     val units = valid.map { unit ->
         if (!unit.isFolder) unit

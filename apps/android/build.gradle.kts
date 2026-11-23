@@ -36,8 +36,8 @@ android {
         // 但本项目通过 GitHub Release 分发，不受 Play 政策约束；本机 SDK 也只装了 35。
         // 升 36 会触发 Android 16 的 edge-to-edge / FGS 行为变更，留到发版前专项适配。
         targetSdk = 35
-        versionCode = 4
-        versionName = "1.1.2"
+        versionCode = 5
+        versionName = "1.1.3"
         // 对比包在「设置 → 关于」里也标出来，避免和正式版看混。
         if (compareSuffix != null) versionNameSuffix = "-compare"
         // 应用显示名：默认走资源，对比包加后缀，桌面上两个图标才分得清。
