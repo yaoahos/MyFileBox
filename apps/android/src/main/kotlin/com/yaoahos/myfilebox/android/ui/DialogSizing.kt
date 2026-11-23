@@ -1,19 +1,23 @@
 package com.yaoahos.myfilebox.android.ui
 
+import android.content.res.Configuration
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.foundation.layout.imePadding
-import android.content.res.Configuration
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
@@ -22,6 +26,9 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
@@ -62,6 +69,55 @@ fun rememberDialogContentMaxHeight(
 
 /** 屏高低于这个值（横屏、分屏、折叠屏内屏半开）就走紧凑形态。 */
 private const val COMPACT_SCREEN_HEIGHT_DP = 480
+
+/**
+ * 长文本弹窗内容区：限高 + 滚动，内容没看完时底部渐隐并提示「上滑查看更多」。
+ *
+ * 渐隐叠在滚动区底部、渐变到弹窗自身的背景色（surfaceContainerHigh），
+ * 被裁切的半行字自然淡出而不是被硬盖住；滑到底提示与渐隐一起消失。
+ * 内容没超出时两者都不渲染，短日志弹窗外观保持原样。
+ */
+@Composable
+fun ScrollableDialogContent(
+    modifier: Modifier = Modifier,
+    content: @Composable ColumnScope.() -> Unit
+) {
+    val scrollState = rememberScrollState()
+    val hasMore = scrollState.maxValue > 0 && scrollState.value < scrollState.maxValue - 8
+    Box(modifier) {
+        Column(
+            Modifier
+                .heightIn(max = rememberDialogContentMaxHeight())
+                .verticalScroll(scrollState),
+            content = content
+        )
+        if (hasMore) {
+            val surface = MaterialTheme.colorScheme.surfaceContainerHigh
+            Box(
+                Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .height(44.dp)
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(Color.Transparent, surface.copy(alpha = 0.92f), surface)
+                        )
+                    )
+            )
+            Text(
+                "上滑查看更多",
+                fontSize = 11.sp,
+                color = MutedText,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 4.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(surface)
+                    .padding(horizontal = 8.dp, vertical = 2.dp)
+            )
+        }
+    }
+}
 
 /**
  * 表单类弹窗的统一外壳。

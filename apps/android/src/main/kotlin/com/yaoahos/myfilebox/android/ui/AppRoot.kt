@@ -428,12 +428,9 @@ fun MyFileBoxApp(viewModel: AppViewModel) {
                 onDismissRequest = viewModel::dismissUpdateDialog,
                 title = { Text("发现新版本 ${info.version}", fontWeight = FontWeight.Bold) },
                 text = {
-                    Column(
-                        Modifier
-                            // 统一口径：按「屏高 - 键盘预留」算，横屏不会被 380dp 顶出屏幕。
-                            .heightIn(max = rememberDialogContentMaxHeight())
-                            .verticalScroll(rememberScrollState())
-                    ) {
+                    // 统一口径：限高按「屏高 - 键盘预留」算；长内容由共用组件给出
+                    // 底部渐隐与「上滑查看更多」，短内容外观不变。
+                    ScrollableDialogContent {
                         // Release 正文原样搬来时带 `**` 标题、`- ` 列表符和噪声行，必须过
                         // conciseNotes 再逐条渲染，否则 markdown 记号直接露在弹窗里
                         // （与「更新日志」弹窗表现也不一致）。
@@ -527,12 +524,7 @@ fun MyFileBoxApp(viewModel: AppViewModel) {
                 onDismissRequest = viewModel::closeUpdateLog,
                 title = { Text("更新日志", fontWeight = FontWeight.Bold) },
                 text = {
-                    Column(
-                        Modifier
-                            // 同上：横屏屏高只有 360dp 上下，写死 420dp 会把标题和按钮顶出屏幕。
-                            .heightIn(max = rememberDialogContentMaxHeight())
-                            .verticalScroll(rememberScrollState())
-                    ) {
+                    ScrollableDialogContent {
                         if (state.updateLogNotes.isEmpty()) {
                             Text(
                                 if (state.updateLogLoading) "正在获取更新日志…" else "暂无更新日志。",
