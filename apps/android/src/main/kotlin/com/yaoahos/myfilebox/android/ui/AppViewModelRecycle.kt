@@ -427,13 +427,17 @@ internal fun AppViewModel.refreshRecycle() {
 
 internal fun AppViewModel.restoreRecycle(item: RecycleItem) {
         viewModelScope.launch {
-            val ok = withContext(Dispatchers.IO) {
+            // 本地这条返回「恢复到哪个绝对路径」：认领回来的孤儿没有原路径，会被放到下载目录，
+            // 提示里要显示真实落点，而不是拿空路径去猜。
+            val restoredPath = withContext(Dispatchers.IO) {
                 when (state.recycleContext) {
-                    FileContext.SYNO -> state.session?.let { dsm.restoreRecycleItem(it, item) } ?: false
+                    FileContext.SYNO ->
+                        if (state.session?.let { dsm.restoreRecycleItem(it, item) } == true) item.originalPath else null
                     else -> local.restoreRecycle(item)
                 }
             }
-            val destParent = displayParent(item.originalPath, state.localRoot)
+            val ok = restoredPath != null
+            val destParent = displayParent(restoredPath ?: item.originalPath, state.localRoot)
             state = state.copy(
                 message = if (ok) "已还原「${item.name}」到 $destParent" else
                     if (state.recycleContext == FileContext.SYNO) dsm.lastError ?: "恢复失败" else "恢复失败"
@@ -452,12 +456,14 @@ internal fun AppViewModel.restoreRecycle(item: RecycleItem) {
                 // 还原后重读清单同样走 IO：这一步和进入页面时的读盘是同一种开销。
                 val items = withContext(Dispatchers.IO) { readLocalRecycle() }
                 state = state.copy(recycleItems = items)
-                if (ok) {
+                if (ok && restoredPath != null) {
                     // 立即把还原项增量插回缓存：全盘扫描要几秒到几十秒，
                     // 只靠 refreshLocal 会让用户回到原位置时看不到刚恢复的文件。
+                    // 用实际落点而不是原路径——重名时文件已经被改成「xxx (1)」，
+                    // 孤儿则落在下载目录，两者都不是 originalPath。
                     applyLocalDelta(
-                        addedFiles = listOfNotNull(localEntryOf(item)),
-                        addedFolders = listOfNotNull(localFolderOf(item))
+                        addedFiles = listOfNotNull(localEntryOf(item, restoredPath)),
+                        addedFolders = listOfNotNull(localFolderOf(item, restoredPath))
                     )
                 } else {
                     refreshLocal()
@@ -468,42 +474,55 @@ internal fun AppViewModel.restoreRecycle(item: RecycleItem) {
     }
 
 
-    /** 刚还原的本地文件 → 缓存条目（供 applyLocalDelta 立即插回原位置）。 */
-internal fun AppViewModel.localEntryOf(item: RecycleItem): FileEntry? {
-        if (item.isFolder) return null
+    /**
+     * 刚还原的本地文件 → 缓存条目（供 applyLocalDelta 立即插回原位置）。
+     *
+     * [path] 必须传**实际落点**：原位置已有同名文件时还原会改名成 `报告 (1).docx`，
+     * 照 [RecycleItem.originalPath] 插回去的话，缓存里那条指向的文件根本不存在，
+     * 用户点开就是「文件已被移动或删除」。
+     */
+internal fun AppViewModel.localEntryOf(item: RecycleItem, path: String = item.originalPath): FileEntry? {
+        if (item.isFolder || path.isBlank()) return null
         val now = System.currentTimeMillis()
+        val name = path.trimEnd('/').substringAfterLast('/')
         return FileEntry(
-            id = item.originalPath,
-            name = item.name,
-            kind = FileKinds.of(item.name),
+            id = path,
+            name = name,
+            kind = FileKinds.of(name),
             sizeLabel = LocalRepository.formatSize(item.sizeBytes),
             timeLabel = LocalRepository.formatStamp(now),
-            folder = displayParent(item.originalPath, state.localRoot),
-            path = item.originalPath,
+            folder = displayParent(path, state.localRoot),
+            path = path,
             sizeBytes = item.sizeBytes,
             modified = now
         )
     }
 
 
-    /** 刚还原的本地文件夹 → 缓存条目。 */
-internal fun AppViewModel.localFolderOf(item: RecycleItem): FolderCard? {
-        if (!item.isFolder) return null
+    /** 刚还原的本地文件夹 → 缓存条目；[path] 同样是实际落点。 */
+internal fun AppViewModel.localFolderOf(item: RecycleItem, path: String = item.originalPath): FolderCard? {
+        if (!item.isFolder || path.isBlank()) return null
         return FolderCard(
-            name = item.name,
+            name = path.trimEnd('/').substringAfterLast('/'),
             meta = "",
             kind = FileKind.FOLDER,
-            path = item.originalPath,
+            path = path,
             date = LocalRepository.formatStamp(System.currentTimeMillis()),
             count = item.childCount
         )
     }
 
 
-    /** 回收站多选操作（清单 6）。 */
+    /**
+     * 回收站多选操作（清单 6）。
+     *
+     * 选择键用落盘全路径而不是 [RecycleItem.id]：列表现在会同时扫当前 `.trash`
+     * 和没搬完的旧目录，两个目录里出现同名 id 时按 id 判断会「勾一个、删两个」。
+     */
 internal fun AppViewModel.toggleRecycleSelected(item: RecycleItem) {
-        val next = if (item.id in state.recycleSelected) state.recycleSelected - item.id
-        else state.recycleSelected + item.id
+        val key = item.trashPath
+        val next = if (key in state.recycleSelected) state.recycleSelected - key
+        else state.recycleSelected + key
         state = state.copy(recycleSelected = next, recycleSelecting = true)
     }
 
@@ -524,7 +543,7 @@ internal fun AppViewModel.setRecycleFilters(name: String, ext: String) {
         val e = ext.trim()
         if (n == state.recycleNameFilter && e == state.recycleExtFilter) return
         val visible = filterVisible(state.recycleItems, n, e, { it.name }, { it.isFolder })
-            .map { it.id }.toSet()
+            .map { it.trashPath }.toSet()
         state = state.copy(
             recycleNameFilter = n,
             recycleExtFilter = e,
@@ -542,7 +561,7 @@ internal fun AppViewModel.clearRecycleFilters() {
 
 internal fun AppViewModel.toggleRecycleSelectAll() {
         // 与浏览页同一口径：全选只认筛出来的那些，否则筛选就形同虚设。
-        val visible = recycleVisibleItems().map { it.id }.toSet()
+        val visible = recycleVisibleItems().map { it.trashPath }.toSet()
         val deselectAll = visible.isEmpty() || state.recycleSelected.containsAll(visible)
         state = state.copy(
             recycleSelected = if (deselectAll) emptySet() else visible,
@@ -557,7 +576,7 @@ internal fun AppViewModel.clearRecycleSelection() {
 
 
 internal fun AppViewModel.recycleSelectedItems(): List<RecycleItem> =
-        state.recycleItems.filter { it.id in state.recycleSelected }
+        state.recycleItems.filter { it.trashPath in state.recycleSelected }
 
 
 internal fun AppViewModel.restoreRecycleMany(items: List<RecycleItem>) {
@@ -572,26 +591,33 @@ internal fun AppViewModel.restoreRecycleMany(items: List<RecycleItem>) {
             var failed = 0
             var done = 0
             val failedIds = mutableListOf<String>()
+            // 每条实际落点：重名时会被改成「xxx (1)」，孤儿会落到下载目录，
+            // 增量插回缓存必须用这个而不是 originalPath。
+            val restoredPaths = HashMap<String, String>()
             withContext(Dispatchers.IO) {
                 when (state.recycleContext) {
                     FileContext.SYNO -> {
                         val session = state.session
                         items.forEach {
                             if (session != null && dsm.restoreRecycleItem(session, it)) ok++ else {
-                                failed++; failedIds += it.id
+                                failed++; failedIds += it.trashPath
                             }
                             publishLocalTaskProgress("正在还原", ++done, total)
                         }
                     }
                     else -> items.forEach {
-                        if (local.restoreRecycle(it)) ok++ else {
-                            failed++; failedIds += it.id
+                        val dest = local.restoreRecycle(it)
+                        if (dest != null) {
+                            ok++
+                            restoredPaths[it.trashPath] = dest
+                        } else {
+                            failed++; failedIds += it.trashPath
                         }
                         publishLocalTaskProgress("正在还原", ++done, total)
                     }
                 }
             }
-            val restored = items.filter { it.id !in failedIds }
+            val restored = items.filter { it.trashPath !in failedIds }
             if (state.recycleContext == FileContext.SYNO && restored.isNotEmpty()) {
                 withContext(Dispatchers.IO) { synoRecycleIndex.remove(restored.map { it.trashPath }) }
             }
@@ -620,10 +646,15 @@ internal fun AppViewModel.restoreRecycleMany(items: List<RecycleItem>) {
             if (state.recycleContext == FileContext.SYNO) {
                 if (restored.isNotEmpty()) refreshSyno()
             } else if (restored.isNotEmpty()) {
-                // 多选还原同样先增量插回缓存，原位置立刻可见。
+                // 多选还原同样先增量插回缓存，原位置立刻可见。落到哪儿用 locator 给的实路径；
+                // 群晖那条分支没有本地落点，退回 originalPath（原来是这个行为）。
                 applyLocalDelta(
-                    addedFiles = restored.mapNotNull { localEntryOf(it) },
-                    addedFolders = restored.mapNotNull { localFolderOf(it) }
+                    addedFiles = restored.mapNotNull { r ->
+                        localEntryOf(r, restoredPaths[r.trashPath] ?: r.originalPath)
+                    },
+                    addedFolders = restored.mapNotNull { r ->
+                        localFolderOf(r, restoredPaths[r.trashPath] ?: r.originalPath)
+                    }
                 )
             } else {
                 refreshLocal()
@@ -642,21 +673,24 @@ internal fun AppViewModel.deleteRecycleItems(items: List<RecycleItem>) {
                 recycleSelected = emptySet(), recycleSelecting = false,
                 localTaskLabel = "正在彻底删除 $total 项…", localTaskRunning = true
             )
+            // 本地彻底删除必须走 LocalRepository.deleteRecycleItems：它把数据文件和
+            // .meta 一起删、只统计真删掉的条目。这里以前自己 deleteRecursively，
+            // meta 留着等下次列表兜底，删除失败也照样报「已彻底删除」。
+            var removed = 0
             val ok = withContext(Dispatchers.IO) {
                 when (state.recycleContext) {
                     FileContext.SYNO -> {
                         val session = state.session
-                        session != null && dsm.deleteRecycleItems(session, items.map { it.trashPath })
+                        val success = session != null && dsm.deleteRecycleItems(session, items.map { it.trashPath })
+                        removed = if (success) items.size else 0
+                        success
                     }
                     else -> {
-                        var done = true
-                        var count = 0
-                        items.forEach { item ->
-                            val target = java.io.File(item.trashPath)
-                            runCatching { if (target.exists()) target.deleteRecursively() }.onFailure { done = false }
-                            publishLocalTaskProgress("正在彻底删除", ++count, total)
+                        val count = local.deleteRecycleItems(items) { done, total ->
+                            publishLocalTaskProgress("正在彻底删除", done, total)
                         }
-                        done
+                        removed = count
+                        count == items.size
                     }
                 }
             }
@@ -678,7 +712,13 @@ internal fun AppViewModel.deleteRecycleItems(items: List<RecycleItem>) {
                 } else {
                     state.recycleLevels
                 },
-                message = if (ok) "已彻底删除 ${items.size} 项" else "删除失败：${dsm.lastError ?: "请稍后重试"}"
+                message = when {
+                    ok -> "已彻底删除 ${items.size} 项"
+                    // 本地失败时不能借群晖的 lastError——那里通常还是上一次请求的残留内容
+                    state.recycleContext == FileContext.SYNO ->
+                        "删除失败：${dsm.lastError ?: "请稍后重试"}"
+                    else -> "已删除 $removed 项，${items.size - removed} 项被占用未能删除"
+                }
             )
         }
     }
@@ -716,10 +756,17 @@ internal fun AppViewModel.emptyRecycle() {
                         message = if (ok) "已清空回收站 · ${paths.size} 项" else dsm.lastError ?: "清空失败"
                     )
                 } else {
-                    val count = withContext(Dispatchers.IO) { local.emptyRecycle() }
+                    val result = withContext(Dispatchers.IO) { local.emptyRecycle() }
+                    // 删不掉的条目（被占用 / 只读）必须还留在列表里，否则「清空了」之后
+                    // 下次进来又冒出来，用户只会觉得清空没生效。
+                    val left = withContext(Dispatchers.IO) { runCatching { local.listRecycle() }.getOrDefault(emptyList()) }
                     state = state.copy(
-                        recycleItems = emptyList(),
-                        message = "已清空回收站 · $count 项"
+                        recycleItems = left,
+                        message = if (result.failed == 0) {
+                            "已清空回收站 · ${result.removed} 项"
+                        } else {
+                            "已清空 ${result.removed} 项，${result.failed} 项被占用未能删除"
+                        }
                     )
                 }
             } finally {

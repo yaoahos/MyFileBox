@@ -154,7 +154,7 @@ fun RecycleScreen(state: MyFileBoxState, vm: AppViewModel) {
                             SelectionSelectAllButton(
                                 // 全选只认筛出来的条目，否则筛选在回收站里等于没用。
                                 allSelected = visibleItems.isNotEmpty() &&
-                                    state.recycleSelected.containsAll(visibleItems.map { it.id }),
+                                    state.recycleSelected.containsAll(visibleItems.map { it.trashPath }),
                                 onClick = vm::toggleRecycleSelectAll
                             )
                         } else {
@@ -318,10 +318,10 @@ fun RecycleScreen(state: MyFileBoxState, vm: AppViewModel) {
                         verticalArrangement = Arrangement.spacedBy(9.dp),
                         modifier = Modifier.fillMaxSize()
                     ) {
-                        items(sortedItems, key = { it.id }) { item ->
+                        items(sortedItems, key = { it.trashPath }) { item ->
                             RecycleGridCard(
                                 item = item,
-                                selected = item.id in state.recycleSelected,
+                                selected = item.trashPath in state.recycleSelected,
                                 selecting = selecting,
                                 onClick = {
                                     when {
@@ -340,12 +340,12 @@ fun RecycleScreen(state: MyFileBoxState, vm: AppViewModel) {
                         contentPadding = PaddingValues(bottom = if (selecting) 96.dp else 24.dp),
                         modifier = Modifier.fillMaxSize()
                     ) {
-                        items(sortedItems, key = { it.id }) { item ->
+                        items(sortedItems, key = { it.trashPath }) { item ->
                             Column(Modifier.animateItem()) {
                                 RecycleRow(
                                     item = item,
                                     localRoot = state.localRoot,
-                                    selected = item.id in state.recycleSelected,
+                                    selected = item.trashPath in state.recycleSelected,
                                     selecting = selecting,
                                     onClick = {
                                         when {
@@ -379,13 +379,14 @@ fun RecycleScreen(state: MyFileBoxState, vm: AppViewModel) {
 
     if (selecting) {
         val chosen = vm.recycleSelectedItems()
+        // 取消全选后选择态还在，没有选中项时这一栏无处可用：整栏置灰，只留「查看详情」按单选判定。
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.BottomCenter) {
             SelectionActionBar(
                 actions = listOf(
-                    SelectionAction(Icons.Outlined.Restore, "还原") {
+                    SelectionAction(Icons.Outlined.Restore, "还原", enabled = chosen.isNotEmpty()) {
                         vm.restoreRecycleMany(chosen)
                     },
-                    SelectionAction(Icons.Outlined.Delete, "彻底删除", danger = true) {
+                    SelectionAction(Icons.Outlined.Delete, "彻底删除", enabled = chosen.isNotEmpty(), danger = true) {
                         confirmDelete = true
                     },
                     SelectionAction(Icons.Outlined.Info, "查看详情", enabled = chosen.size == 1) {
@@ -536,8 +537,10 @@ private fun RecycleRow(
             )
             Text(
                 // 同名文件只看名字分不清，补一行原位置（回收站里最常被问的就是「这是从哪删的」）。
+                // 认领回来的孤儿没有原路径，不能拿 root 去猜，直接说明不知道。
                 if (showFolderHint) {
-                    displayParent(item.originalPath, localRoot) + " · " + LocalRepository.formatStamp(item.deletedAt)
+                    (if (item.originalPath.isBlank()) "原位置未知" else displayParent(item.originalPath, localRoot)) +
+                        " · " + LocalRepository.formatStamp(item.deletedAt)
                 } else {
                     LocalRepository.formatStamp(item.deletedAt)
                 },
@@ -673,10 +676,16 @@ private fun RecycleDetailDialog(
                 DetailLine("类型", if (item.isFolder) "文件夹" else "文件")
                 DetailLine("大小", if (item.isFolder) "—" else formatBytes(item.sizeBytes))
                 DetailLine("删除时间", LocalRepository.formatFull(item.deletedAt))
-                DetailLine("原位置", item.originalPath, onClick = {
-                    onCopyPath()
-                    copied = true
-                })
+                // 认领回来的孤儿没有原路径：还原会放到下载目录，这里如实说明，
+                // 别显示一个空行让人以为信息丢了。
+                if (item.originalPath.isBlank()) {
+                    DetailLine("原位置", "未知（还原时放到下载目录）")
+                } else {
+                    DetailLine("原位置", item.originalPath, onClick = {
+                        onCopyPath()
+                        copied = true
+                    })
+                }
             }
         },
         confirmButton = {

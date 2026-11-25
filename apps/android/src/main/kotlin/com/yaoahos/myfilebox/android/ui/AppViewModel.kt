@@ -681,6 +681,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         // "自动清理" really means automatic: purge expired items on every cold start.
         // days <= 0 means "永不" and must never delete anything.
         if (prefs.recycleDays > 0) launchCleanup(prefs.recycleDays)
+        // 关掉「自动清理」时不会走 purge，这里补一次：把老版本留在存储根的回收站搬进私有目录，
+        // 否则它既不会被清理，卸载后也不会被系统删掉。
+        else viewModelScope.launch(Dispatchers.IO) { runCatching { local.warmRecycle() } }
         TransferCancellation.addListener(cancelListener)
         pruneTransferCache()
         maybeAutoCheckUpdate()
