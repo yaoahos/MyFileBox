@@ -227,6 +227,8 @@ internal fun AppViewModel.homeDerived(): HomeDerived {
         return homeDerivedCache.getOrCompute(
             files = s.localFiles,
             folders = s.localFolders,
+            // 深层收藏的反查结果也参与缓存键：解析完成后收藏计数要跟着变。
+            favorites = s.localFavorites,
             prefs = s.prefs,
             rootPath = rootPath,
             nameFilter = s.nameFilter,
@@ -1544,6 +1546,58 @@ internal fun AppViewModel.favoriteKey(file: FileEntry): String = if (file.path.i
  * `folder:` 前缀。写入只认一种、删除却要两种都清，否则「取消收藏」只删掉其中一条，
  * 另一条还留着 → 收藏页刷新后又冒出来。
  */
+/**
+ * 从收藏 key 里挑出「本地、位于存储根之下」的路径，供按路径反查条目。
+ *
+ * 首页快照只收录存储根一层的文件夹，深层文件夹收藏后 key 记着、条目却筛不出来，
+ * 收藏页里就永远看不到它。反查只需要这些路径，不需要扫目录。
+ *
+ * 只认 [localRoot] 下面的路径：
+ * · 群晖收藏是 `/photo/2026` 这种服务器路径，与本机文件系统无关；
+ * · 网络位置的 key 带 `net:` 或协议前缀；
+ * · `folder:` 是首页文件夹卡片的写法，去掉前缀即为路径。
+ */
+internal fun favoritePathsToResolve(favorites: Set<String>, localRoot: String): List<String> {
+    val root = localRoot.trimEnd('/')
+    if (root.isBlank()) return emptyList()
+    return favorites.mapNotNull { key ->
+        val path = when {
+            key.startsWith("folder:") -> key.removePrefix("folder:")
+            key.startsWith("net:") -> return@mapNotNull null
+            else -> key
+        }
+        path.trimEnd('/').takeIf { it.startsWith("$root/") }
+    }.distinct()
+}
+
+
+/**
+ * 合并本地收藏的三个来源：
+ * ① 首页文件夹卡片（调用方已按 key 筛好）；
+ * ② 全盘快照里的文件；
+ * ③ 深层路径的反查结果（[resolveLocalFavorites]）。
+ *
+ * 一个条目在收藏里可能有两种 key 写法（裸路径 / `folder:` 前缀），两种都认，
+ * 否则从「更多 → 收藏」加进来的文件夹会看不到。反查结果与快照必然重叠
+ * （深层文件本来就在全盘快照里），同一路径只留一条——收藏页用
+ * `LazyColumn(key = id)` 渲染，重复 id 会直接崩。
+ */
+internal fun mergeLocalFavorites(
+    folders: List<FileEntry>,
+    files: List<FileEntry>,
+    resolved: List<FileEntry>,
+    favoriteKeys: Set<String>
+): List<FileEntry> {
+    fun FileEntry.isFavorited(): Boolean {
+        val clean = path.trimEnd('/')
+        return if (clean.isBlank()) id in favoriteKeys
+        else clean in favoriteKeys || "folder:$clean" in favoriteKeys
+    }
+    return (folders + files.filter { it.isFavorited() } + resolved.filter { it.isFavorited() })
+        .distinctBy { it.path.trimEnd('/').ifBlank { it.id } }
+}
+
+
 internal fun AppViewModel.favoriteKeysOf(file: FileEntry): Set<String> = setOf(
     file.id,
     favoriteKey(file),
@@ -1576,6 +1630,9 @@ internal fun AppViewModel.toggleFavorite(file: FileEntry) {
             message = if (nowFav) "已收藏「${file.name}」" else "已取消收藏「${file.name}」"
         )
         persist()
+        // 收藏的可能是首页快照覆盖不到的深层文件夹，先反查好条目，
+        // 否则收藏页里看不到它（只是「已收藏」状态生效）。
+        refreshLocalFavorites()
         viewModelScope.launch { reloadBrowserItems() }
     }
 
@@ -1597,6 +1654,7 @@ internal fun AppViewModel.toggleFavoriteFolder(folder: FolderCard) {
             message = if (nowFav) "已收藏「${folder.name}」" else "已取消收藏「${folder.name}」"
         )
         persist()
+        refreshLocalFavorites()
         viewModelScope.launch { reloadBrowserItems() }
     }
 
@@ -1628,7 +1686,9 @@ internal fun AppViewModel.favoriteFiles(ctx: FileContext = FileContext.LOCAL): L
                             entry.path.trimEnd('/') in keys
                     }
                     .map { folderEntry(it) }
-                folders + state.localFiles.filter { favoriteKey(it) in keys }
+                // 深层目录里的文件夹不在首页快照里（快照只到存储根一层），
+                // 靠 resolveLocalFavorites() 按 key 反查出条目后放在这里。
+                mergeLocalFavorites(folders, state.localFiles, state.localFavorites, keys)
             }
             // 群晖收藏展示已收藏的群晖文件与文件夹（清单 5）：由 refreshSynoFavorites 解析。
             // 解析结果要按当前 favorites 集合再过一遍 —— 取消收藏后 synoFavorites 里
@@ -1640,6 +1700,46 @@ internal fun AppViewModel.favoriteFiles(ctx: FileContext = FileContext.LOCAL): L
                 else state.shares.flatMap { it.items }.filter { favoriteKey(it) in all }
             }
             FileContext.NET -> emptyList()
+        }
+    }
+
+
+    /**
+     * 本地收藏里需要按路径反查的那些 key。
+     *
+     * 只认存储根底下的路径（本地收藏是本机路径），群晖与网络位置的 key 一律不碰；
+     * `folder:` 前缀是首页文件夹卡片的另一种写法，去掉前缀就是路径。
+     */
+internal fun AppViewModel.localFavoritePathsToResolve(): List<String> =
+        favoritePathsToResolve(state.prefs.favorites, state.localRoot)
+
+
+    /**
+     * 解析本地收藏：把首页快照覆盖不到的深层条目按路径反查出来。
+     *
+     * 首页快照的文件夹只到存储根一层（`folderCards(root)`），所以
+     * 「在 DCIM/Camera 里点收藏」记下的 key 永远筛不出条目——
+     * 收藏页看不到、首页收藏计数也少一个。这里只 stat 收藏里确实记着的路径
+     * （通常个位数），不扫目录，开销可以忽略。
+     *
+     * 文件其实早就在全盘快照的 `localFiles` 里，这一层主要是给文件夹兜底，
+     * 同时覆盖「刚收藏、快照还没刷新」和「快照未收录的受限目录」两种情况。
+     */
+internal fun AppViewModel.refreshLocalFavorites() {
+        viewModelScope.launch { resolveLocalFavorites() }
+    }
+
+
+internal suspend fun AppViewModel.resolveLocalFavorites() {
+        val paths = localFavoritePathsToResolve()
+        val entries = withContext(Dispatchers.IO) {
+            paths.mapNotNull { runCatching { local.stat(it) }.getOrNull() }
+        }
+        state = state.copy(localFavorites = entries)
+        // 收藏页是打开时的快照：解析完成后同步刷新，否则新收藏还是看不到。
+        val browser = state.browser
+        if (browser?.favorites == true && browser.ctx == FileContext.LOCAL) {
+            state = state.copy(browser = browser.copy(items = favoriteFiles(FileContext.LOCAL)))
         }
     }
 
@@ -1710,6 +1810,8 @@ internal suspend fun AppViewModel.resolveSynoFavorites() {
 
 internal fun AppViewModel.openFavorites(ctx: FileContext = FileContext.LOCAL) {
         if (ctx == FileContext.SYNO) refreshSynoFavorites()
+        // 本地同理：深层文件夹要按路径反查才能进列表，反查完会就地刷新这一页。
+        if (ctx == FileContext.LOCAL) refreshLocalFavorites()
         val files = favoriteFiles(ctx)
         val path = when (ctx) {
             FileContext.LOCAL -> state.localRoot

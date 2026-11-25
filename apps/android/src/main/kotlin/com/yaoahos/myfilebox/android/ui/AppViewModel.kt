@@ -408,6 +408,15 @@ data class MyFileBoxState(
     /** 群晖收藏解析结果（收藏页展示用，文件与文件夹都要能看）。 */
     val synoFavorites: List<FileEntry> = emptyList(),
     /**
+     * 本地收藏里「首页快照覆盖不到」的条目（主要是深层文件夹）。
+     *
+     * 首页快照只有存储根一层的文件夹（`folderCards(root)`），在 `DCIM/Camera` 这类
+     * 深层目录里点收藏，key 记下了、条目却永远筛不出来——收藏页看不到它，首页的
+     * 收藏计数也少一个。这里存按路径反查（[LocalRepository.stat]）的结果，
+     * 由 `resolveLocalFavorites()` 在后台刷新，不落盘。
+     */
+    val localFavorites: List<FileEntry> = emptyList(),
+    /**
      * 群晖服务器上真实存在的收藏路径（SYNO.FileStation.Favorite list 的结果）。
      *
      * 本机 `prefs.favorites` 只记录「在这台设备上点过收藏」；DSM 网页端或另一台设备
@@ -674,6 +683,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             hideRecentCache = prefsStore.getBoolean("recent_hide_cache", true)
         )
         refreshLocal()
+        // 收藏里记的深层文件夹要按路径反查条目（首页快照只到根目录一层），
+        // 冷启动先解析一次，首页的收藏计数与收藏页才不会缺项。
+        refreshLocalFavorites()
         // 「最近」先走媒体库索引，几百毫秒内就能出列表，不必等全盘扫描。
         refreshRecent()
         // 冷启动自动恢复群晖会话与网络位置状态，用户不用每次重开都重新建连接。

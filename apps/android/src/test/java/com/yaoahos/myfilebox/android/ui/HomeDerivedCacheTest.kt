@@ -37,15 +37,16 @@ class HomeDerivedCacheTest {
         val cache = HomeDerivedCache()
         val files = listOf(file("a.txt", "/sdcard/a.txt"))
         val folders = listOf(folder("DCIM", "/sdcard/DCIM"))
+        val favs = emptyList<FileEntry>()
         val prefs = AppPrefs()
         var calls = 0
 
         repeat(5) {
-            val value = cache.getOrCompute(files, folders, prefs, "/sdcard", "", "") {
+            val value = cache.getOrCompute(files, folders, favs, prefs, "/sdcard", "", "") {
                 calls++
                 derived()
             }
-            assertSame("同样的输入必须拿到同一个对象", value, cache.getOrCompute(files, folders, prefs, "/sdcard", "", "") { calls++; derived() })
+            assertSame("同样的输入必须拿到同一个对象", value, cache.getOrCompute(files, folders, favs, prefs, "/sdcard", "", "") { calls++; derived() })
         }
 
         // 每次循环里取了两次：第一次算、第二次命中，5 轮总共只应算 1 次（第二轮起第一次也命中）。
@@ -56,9 +57,10 @@ class HomeDerivedCacheTest {
     fun `扫描结果变化后重新计算`() {
         val cache = HomeDerivedCache()
         val folders = emptyList<FolderCard>()
+        val favs = emptyList<FileEntry>()
         val prefs = AppPrefs()
         var calls = 0
-        fun get(files: List<FileEntry>) = cache.getOrCompute(files, folders, prefs, "/sdcard", "", "") {
+        fun get(files: List<FileEntry>) = cache.getOrCompute(files, folders, favs, prefs, "/sdcard", "", "") {
             calls++
             derived()
         }
@@ -79,9 +81,10 @@ class HomeDerivedCacheTest {
         val cache = HomeDerivedCache()
         val files = listOf(file("a.txt", "/sdcard/a.txt"))
         val folders = emptyList<FolderCard>()
+        val favs = emptyList<FileEntry>()
         var calls = 0
         fun get(prefs: AppPrefs, name: String, ext: String) =
-            cache.getOrCompute(files, folders, prefs, "/sdcard", name, ext) { calls++; derived() }
+            cache.getOrCompute(files, folders, favs, prefs, "/sdcard", name, ext) { calls++; derived() }
 
         val plain = AppPrefs()
         get(plain, "", "")
@@ -98,5 +101,31 @@ class HomeDerivedCacheTest {
         assertEquals(3, calls)
         get(byTime, "报告", "pdf")
         assertEquals(4, calls)
+    }
+
+    /**
+     * 深层收藏的反查结果是异步补进来的（`resolveLocalFavorites`）。
+     *
+     * 它到货时扫描结果和偏好都没变，如果缓存键里不含它，首页的收藏计数就会
+     * 一直停在「少一个」的状态，直到下次扫描才纠正。
+     */
+    @Test
+    fun `深层收藏解析结果变化后重新计算`() {
+        val cache = HomeDerivedCache()
+        val files = listOf(file("a.txt", "/sdcard/a.txt"))
+        val folders = emptyList<FolderCard>()
+        val prefs = AppPrefs()
+        var calls = 0
+        fun get(favs: List<FileEntry>) =
+            cache.getOrCompute(files, folders, favs, prefs, "/sdcard", "", "") { calls++; derived() }
+
+        val none = emptyList<FileEntry>()
+        get(none)
+        get(none)
+        assertEquals(1, calls)
+
+        // 反查完成：新的列表实例必须触发重算。
+        get(listOf(file("Camera", "/sdcard/DCIM/Camera", FileKind.FOLDER)))
+        assertEquals(2, calls)
     }
 }

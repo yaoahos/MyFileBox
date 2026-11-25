@@ -282,6 +282,22 @@ class LocalRepository(private val context: Context) {
             .orEmpty()
     }
 
+    /**
+     * 取单个路径的条目；不存在（或读不到）返回 null。
+     *
+     * 收藏页要显示「深层目录里的文件夹」：首页快照只到存储根的一层（`folderCards(root)`），
+     * 深层文件夹根本不在里面，光靠快照永远筛不出来。有了这个入口就能按收藏里记的路径
+     * 反查一次，显示名、子项数、时间都与列表页一致。
+     *
+     * 只在收藏解析那条后台路径上调用（IO 线程），不要放进首帧渲染链路。
+     */
+    fun stat(path: String): FileEntry? {
+        if (path.isBlank()) return null
+        val file = File(path)
+        if (!file.exists()) return null
+        return runCatching { file.toEntry() }.getOrNull()
+    }
+
     fun category(kind: FileKind): List<FileEntry> {
         val roots = listOf(
             File(root(), Environment.DIRECTORY_DOWNLOADS),

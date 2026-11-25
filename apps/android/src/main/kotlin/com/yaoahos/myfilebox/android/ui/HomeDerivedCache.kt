@@ -38,6 +38,8 @@ internal class HomeDerived(
 internal class HomeDerivedCache {
     private var filesRef: List<FileEntry>? = null
     private var foldersRef: List<FolderCard>? = null
+    /** 深层收藏的反查结果：变了就说明收藏页条目变了，缓存必须重算。 */
+    private var favoritesRef: List<FileEntry>? = null
     private var prefsRef: AppPrefs? = null
     private var rootPath: String = ""
     private var nameFilter: String = ""
@@ -47,6 +49,7 @@ internal class HomeDerivedCache {
     fun getOrCompute(
         files: List<FileEntry>,
         folders: List<FolderCard>,
+        favorites: List<FileEntry>,
         prefs: AppPrefs,
         rootPath: String,
         nameFilter: String,
@@ -57,6 +60,7 @@ internal class HomeDerivedCache {
         if (cached != null &&
             files === filesRef &&
             folders === foldersRef &&
+            favorites === favoritesRef &&
             prefs === prefsRef &&
             rootPath == this.rootPath &&
             nameFilter == this.nameFilter &&
@@ -67,6 +71,7 @@ internal class HomeDerivedCache {
         val fresh = compute()
         filesRef = files
         foldersRef = folders
+        favoritesRef = favorites
         prefsRef = prefs
         this.rootPath = rootPath
         this.nameFilter = nameFilter
