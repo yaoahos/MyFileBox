@@ -57,4 +57,29 @@ class JumpPageChainTest {
         val b = page("Temp", "/b/Temp", "群晖文件 / b / Temp")
         assertNotEquals(browserKeyOf(a), browserKeyOf(b))
     }
+
+    @Test
+    fun `入栈时摘掉与目标同 key 的旧页面`() {
+        val photo = page("photo", "/photo", "群晖文件 / photo")
+        val temp = page("Temp", "/photo/Temp", "群晖文件 / photo / Temp")
+        assertEquals(listOf(fav, photo), parentStackFor(listOf(fav, photo, temp), temp))
+        assertEquals(emptyList<BrowserState>(), parentStackFor(emptyList(), temp))
+    }
+
+    /**
+     * 反复「目录 → 收藏 → 目录」不能让返回栈越堆越深：
+     * 用户的实际感受就是「点了几次收藏，就要按几次返回才能回首页」。
+     */
+    @Test
+    fun `反复经收藏进入同一目录，返回栈深不增长`() {
+        var stack = listOf<BrowserState>()
+        // 进收藏 → 进 Temp → 更多里再点收藏 → 再进 Temp …… 来回 5 轮
+        repeat(5) {
+            stack = parentStackFor(stack, fav)
+            stack = parentStackFor(listOf(fav) + listOf(photo), temp)
+        }
+        assertEquals(listOf(browserKeyOf(fav), browserKeyOf(photo)), stack.map { browserKeyOf(it) })
+        // 从 Temp 回首页固定 3 次：photo → 收藏 → 首页
+        assertEquals(3, stack.size + 1)
+    }
 }

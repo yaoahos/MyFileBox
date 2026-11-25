@@ -885,15 +885,19 @@ internal fun AppViewModel.pushBrowser(next: BrowserState, stackOverride: List<Br
             FileContext.SYNO -> TabKey.SYNO
             FileContext.NET -> TabKey.NET
         }
+        // 同一个页面在历史里只留一份：反复「目录 → 收藏 → 目录」时，旧的那一层
+        // 不能和新的一起摞着——否则返回要按十几次才回得到首页。
+        val base = stackOverride
+            ?: if (current != null) state.browserStack + current else state.browserStack
+        val stack = parentStackFor(base, next)
         // 跳进一串补出来的层级时，把整条 pageKey 链交给转场宿主重建页面栈。
         // 少了这一步，返回父级时那个 key 从没进过栈，会被判成「前进」——画面从右边进，
         // 而用户是按了返回，方向就反了。平时单页入栈仍交给宿主自己判断。
-        val chain = stackOverride?.let { override -> jumpPageChain(tab, override, next) }
+        val chain = if (stackOverride != null) jumpPageChain(tab, stack, next) else null
         // 进目录是用户导航：进行中的「定位目标文件夹」要作废。
         state = state.copy(
             browser = next.copy(grid = viewMode(tab) == "grid"),
-            browserStack = stackOverride
-                ?: if (current != null) state.browserStack + current else state.browserStack,
+            browserStack = stack,
             selected = emptySet(), selectionActive = false,
             // 进入新目录意味着换了「当前位置」，上一处的筛选词不能跟过来。
             nameFilter = "",
@@ -906,19 +910,36 @@ internal fun AppViewModel.pushBrowser(next: BrowserState, stackOverride: List<Br
 
 
 /**
+ * 一次入栈后的返回栈：同一个页面在历史里只留一份。
+ *
+ * 「目录 → 收藏 → 目录 → 收藏」这样来回点时，同一个目录会被再次进入。旧的那份
+ * 若留在栈里，返回就要多按几次才出得去，点得越多按得越多。这里把与目标同 key
+ * 的旧记录摘掉，栈深就不会随点击次数增长。
+ */
+internal fun parentStackFor(pages: List<BrowserState>, target: BrowserState): List<BrowserState> {
+    val key = browserKeyOf(target)
+    return pages.filterNot { browserKeyOf(it) == key }
+}
+
+
+/**
  * 从虚拟页（收藏）跳进真实目录时的返回栈。
  *
  * 收藏页是集合快照，不是目录：它入栈后面包屑就成了「收藏 › 目标名」，目标文件
  * 实际在 /photo/2026 下，用户看到的层级是错的。这里改成——
- *   · 收藏页留在栈底，按返回仍然回到收藏；
+ *   · 收藏页作为新链的起点，按返回先回到收藏；
  *   · 中间按目标目录的真实路径补出上层页（items 留空，回到那一层时再加载）；
  *   · 面包屑跳过虚拟页（见 BrowserScreen），于是显示的是真实位置。
+ *
+ * 收藏之前的目录历史**不再带进来**：虚拟页是顶层入口，每进一次收藏就相当于换了一个
+ * 起点。否则反复「目录 → 收藏 → 目录」，每一轮都把上一轮的目录再摞一遍，
+ * 返回要按十几次才回得到首页。
  *
  * 不是虚拟页时返回 null，走默认的「当前页入栈」。
  */
 private fun AppViewModel.stackForJumpFromVirtual(origin: BrowserState, target: BrowserState): List<BrowserState>? {
     if (!origin.isVirtualPage()) return null
-    return state.browserStack + origin + pathAncestorPages(target.ctx, target.netId, target.location)
+    return listOf(origin) + pathAncestorPages(target.ctx, target.netId, target.location)
 }
 
 /** 这一端的根：本地是存储根，群晖从共享名算起，网络位置是连接里填的起始路径。 */
