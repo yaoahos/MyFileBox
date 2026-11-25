@@ -14,35 +14,44 @@ val keystoreProps = Properties().apply {
     val f = signingDir.resolve("keystore.properties")
     if (f.exists()) FileInputStream(f).use { load(it) }
 }
-val releaseKeystore = signingDir.resolve("myfilebox-release.jks")
-// 本地回归允许 -PforceDebugSign=true 临时用 debug 签名打包：
+/**
+ * 签名库路径：`keystore.properties` 里写的是 `signing/xxx.jks`（相对工程根），
+ * 而 [signingDir] 本身已经是工程根的 `signing/`，直接 resolve 会变成
+ * `signing/signing/xxx.jks`。只取文件名再拼，两种写法都能命中。
+ */
+fun keystoreIn(key: String, defaultName: String): File =
+    signingDir.resolve(keystoreProps.getProperty(key, defaultName).trim().substringAfterLast('/'))
+
+val releaseKeystore = keystoreIn("releaseStoreFile", "myfilebox-release.jks")
+val debugKeystore = keystoreIn("debugStoreFile", "myfilebox-debug.jks")
+// 本地回归允许 -PforceDebugSign=true 临时用 debug 签名打包（正式包名不变）：
 // 签名一致才能覆盖安装，不必卸载、不会丢已保存的连接配置。正式发布不加该参数。
 val forceDebugSign = (project.findProperty("forceDebugSign") as String?) == "true"
-// 对比测试包：传 -PcompareSuffix=.compare 时包名换成 com.yaoahos.myfilebox.compare，
-// 可与正式版/旧版同机共存做 A/B 对比；不传则与原来完全一致。
-// 包名变了 FileProvider authority（${applicationId}.files）和数据目录会一起隔离，
-// 两个 App 的配置、记录、回收站互不影响。
-val compareSuffix = (project.findProperty("compareSuffix") as String?)?.trim()?.takeIf { it.isNotEmpty() }
-val hasReleaseKeystore = releaseKeystore.exists() && keystoreProps.isNotEmpty() && !forceDebugSign
+// 调试包：传 -PdebugBuild=true 时包名 com.yaoahos.myfilebox.debug、
+// 应用名「MyFileBox 调试版」、用 signing/myfilebox-debug.jks 独立签名，
+// 与正式版（包名 / 签名 / 数据目录 / FileProvider authority）全方位隔离，可同机共存。
+// 不带参数就是正式版，包名与签名与已发布版本完全一致。
+val debugBuild = (project.findProperty("debugBuild") as String?) == "true"
+val hasReleaseKeystore = releaseKeystore.exists() && keystoreProps.isNotEmpty() && !forceDebugSign && !debugBuild
 
 android {
     namespace = "com.yaoahos.myfilebox.android"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.yaoahos.myfilebox" + (compareSuffix ?: "")
+        applicationId = "com.yaoahos.myfilebox" + if (debugBuild) ".debug" else ""
         minSdk = 26
         // 复核 2026-11：Google Play 自 2026-08-31 要求更新 target 36，
         // 但本项目通过 GitHub Release 分发，不受 Play 政策约束；本机 SDK 也只装了 35。
         // 升 36 会触发 Android 16 的 edge-to-edge / FGS 行为变更，留到发版前专项适配。
         targetSdk = 35
-        versionCode = 5
-        versionName = "1.1.3"
-        // 对比包在「设置 → 关于」里也标出来，避免和正式版看混。
-        if (compareSuffix != null) versionNameSuffix = "-compare"
-        // 应用显示名：默认走资源，对比包加后缀，桌面上两个图标才分得清。
+        versionCode = 6
+        versionName = "1.1.4"
+        // 调试包在「设置 → 关于」里也标出来，避免和正式版看混。
+        if (debugBuild) versionNameSuffix = "-debug"
+        // 应用显示名：默认走资源，调试包用独立名字，桌面上两个图标一眼可分。
         manifestPlaceholders["appLabel"] =
-            if (compareSuffix != null) "MyFileBox 对比版" else "@string/app_name"
+            if (debugBuild) "MyFileBox 调试版" else "@string/app_name"
         vectorDrawables.useSupportLibrary = true
     }
 
@@ -86,6 +95,17 @@ android {
                 keyPassword = keystoreProps.getProperty("releaseKeyPassword")
             }
         }
+        // 调试包专用签名：用 signing/myfilebox-debug.jks，与正式证书彻底不同。
+        // agent 默认的 debug 配置用 ~/.android/debug.keystore，换机器就变，不能保证可覆盖；
+        // 这里钉死项目自带的 jks，任何机器打出的调试包签名一致。
+        if (debugKeystore.exists()) {
+            create("debugSign") {
+                storeFile = debugKeystore
+                storePassword = keystoreProps.getProperty("debugStorePassword")
+                keyAlias = keystoreProps.getProperty("debugKeyAlias")
+                keyPassword = keystoreProps.getProperty("debugKeyPassword")
+            }
+        }
     }
 
     buildTypes {
@@ -96,11 +116,13 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            // 有正式密钥就用正式签名；没有则回落 debug，保证任何机器都能编出可安装包。
-            signingConfig = if (hasReleaseKeystore) {
-                signingConfigs.getByName("releaseSign")
-            } else {
-                signingConfigs.getByName("debug")
+            // 调试包走独立 debugSign；正式包有正式密钥就用 releaseSign，
+            // 没有则回落 AGP 默认 debug，保证任何机器都能编出可安装包。
+            signingConfig = when {
+                debugBuild && signingConfigs.findByName("debugSign") != null ->
+                    signingConfigs.getByName("debugSign")
+                hasReleaseKeystore -> signingConfigs.getByName("releaseSign")
+                else -> signingConfigs.getByName("debug")
             }
         }
     }

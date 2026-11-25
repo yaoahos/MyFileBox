@@ -32,15 +32,15 @@ aapt2 dump badging <apk>
 - 权限：`INTERNET`、`ACCESS_NETWORK_STATE`、存储读写 / 媒体读取、`MANAGE_EXTERNAL_STORAGE`、`REQUEST_INSTALL_PACKAGES`、`POST_NOTIFICATIONS`、前台传输服务
 - 签名：仓库不分发签名文件。没有本地签名配置时，release 变体回落到 debug 签名，仅供本地安装验证，不能用于分发。
 
-## 对比包
+## 调试版
 
-需要在同一台设备上与正式版共存做 A/B 时：
+需要在同一台设备上与正式版共存做对照测试时：
 
 ```
-gradle :apps:android:assembleRelease -PcompareSuffix=.compare -PforceDebugSign=true
+gradle :apps:android:assembleRelease -PdebugBuild=true
 ```
 
-包名变为 `com.yaoahos.myfilebox.compare`，应用名显示「MyFileBox 对比版」，数据目录与 FileProvider authority 一并隔离。
+包名变为 `com.yaoahos.myfilebox.debug`，应用名显示「MyFileBox 调试版」，使用 `signing/myfilebox-debug.jks` 独立签名（仓库不分发该文件，需本地自备），数据目录与 FileProvider authority 一并隔离，可与正式版同机共存互不影响。不带该参数就是正式包，包名和签名与已发布版本完全一致。
 
 ## 权限说明
 
