@@ -47,3 +47,43 @@ fun displayLeaf(path: String, root: String, rootLabel: String = STORAGE_ROOT_LAB
  */
 fun displayParent(path: String, root: String, rootLabel: String = STORAGE_ROOT_LABEL): String =
     displayLeaf(path.trim().trimEnd('/').substringBeforeLast('/'), root, rootLabel)
+
+/** 一级上层目录：显示名 + 该层的绝对路径。 */
+data class PathLevel(val name: String, val path: String)
+
+/**
+ * 一条目录路径的逐级上层（从最外层开始，不含自身）。
+ *
+ * 从收藏这类「集合快照」直接跳进某个目录时，面包屑原先是在来源页后面拼目标名，
+ * 于是 /photo/2026/旅行 会显示成「收藏 › 旅行」——收藏不是目录，层级是错的。
+ * 有了这份上层列表，才能按真实位置显示「photo › 2026 › 旅行」。
+ *
+ * [base] 是这一端的根：本地传存储根，网络位置传连接里填的起始路径（如 `/dav`）。
+ * 摘掉 [base] 之后剩下的段才是一级级目录；只剩一段（就是根自身）时没有上层。
+ * WebDAV 的条目路径是完整 URL，`scheme://host` 会先摘掉再拆，重建时原样拼回，
+ * 免得「https:」被当成一级目录。
+ */
+fun ancestorLevels(location: String, base: String = ""): List<PathLevel> {
+    val clean = location.trim().trimEnd('/')
+    val root = base.trim().trimEnd('/')
+    if (clean.isBlank() || clean == root) return emptyList()
+    // 完整 URL：拆出 "scheme://host" 前缀，剩下的才是目录部分。
+    val schemeEnd = clean.indexOf("://")
+    val authority = if (schemeEnd >= 0) {
+        val afterScheme = clean.substring(schemeEnd + 3)
+        val slash = afterScheme.indexOf('/')
+        if (slash < 0) return emptyList()
+        clean.substring(0, clean.length - afterScheme.length + slash)
+    } else ""
+    val pathPart = clean.removePrefix(authority)
+    val underRoot = root.isNotBlank() && pathPart.startsWith("$root/")
+    val relative = if (underRoot) pathPart.removePrefix(root) else pathPart
+    if (!relative.startsWith("/")) return emptyList()
+    val segments = relative.split('/').filter { it.isNotBlank() }
+    if (segments.size <= 1) return emptyList()
+    var acc = if (underRoot) authority + root else authority
+    return segments.dropLast(1).map { name ->
+        acc = if (acc.isBlank() || acc == "/") "/$name" else "$acc/$name"
+        PathLevel(name, acc)
+    }
+}

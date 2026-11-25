@@ -1008,7 +1008,7 @@ internal fun AppViewModel.stageClipboard(mode: TransferMode, items: List<FileEnt
      */
 internal fun AppViewModel.browserIsVirtual(): Boolean {
         val browser = state.browser ?: return false
-        return browser.favorites || browser.localCategory != null
+        return browser.isVirtualPage()
     }
 
 

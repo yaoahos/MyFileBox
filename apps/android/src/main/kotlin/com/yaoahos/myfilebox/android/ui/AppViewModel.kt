@@ -113,6 +113,13 @@ data class BrowserState(
     val favorites: Boolean = false
 )
 
+/**
+ * 这一页是不是「集合快照」——收藏、图片 / 视频 / 最近这些分类页。
+ *
+ * 它们不是目录：没有真实的上级路径，也不该出现在面包屑里当某一层目录。
+ */
+internal fun BrowserState.isVirtualPage(): Boolean = favorites || localCategory != null
+
 data class Destination(
     val type: DestType,
     val key: String,

@@ -147,6 +147,18 @@ internal fun isRestrictedSystemDir(path: String, ownPackage: String): Boolean {
     return p.contains("/Android/data") || p.contains("/Android/obb")
 }
 
+/**
+ * 面包屑要显示的页面下标（相对返回栈）。
+ *
+ * 收藏、图片、视频、最近这些是集合快照，不是目录：留在栈里是为了「返回」能回到它们，
+ * 但不该出现在面包屑上——否则从收藏点进 /photo/2026/旅行 会显示成「收藏 › 2026 › 旅行」。
+ * 当前页本身是虚拟页时仍要显示，不然停在收藏页就只剩一个模块名。
+ */
+internal fun breadcrumbIndices(trail: List<BrowserState>): List<Int> =
+    trail.indices.filter { index ->
+        index == trail.lastIndex || !trail[index].isVirtualPage()
+    }
+
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun BrowserScreen(state: MyFileBoxState, vm: AppViewModel) {
@@ -265,17 +277,23 @@ fun BrowserScreen(state: MyFileBoxState, vm: AppViewModel) {
                         // 不再从 browser.path 拆段：path 里塞过「内部存储」「网络文件」「协议名」，
                         // 拆出来就成了「网络存储 › 网络文件 › 我的群晖 › WebDAV」——结构层、模块名、
                         // 协议全混在一条线上，而且中间那几段点了也回不去。
-                        val trail = crumbTrail.map { it.title }
+                        //
+                        // 收藏页与分类页是集合快照，不是目录：它们只作为「返回目标」留在栈里，
+                        // 不进面包屑，否则从收藏点进 /photo/2026/旅行 会显示成「收藏 › 2026 › 旅行」。
+                        // 当前页本身是虚拟页时仍要显示，不然停在收藏页会只剩一个模块名。
+                        val visibleIndices = breadcrumbIndices(crumbTrail)
+                        val trail = visibleIndices.map { crumbTrail[it].title }
                             // 单层页面且标题与模块名相同时只留一层，避免「本地文件 › 本地文件」。
                             .let { if (it.size == 1 && it.first() == moduleLabel) emptyList() else it }
                         PathBreadcrumbs(
                             labels = listOf(moduleLabel) + trail,
                             emphasizeCurrent = false,
                             chevronSize = 11.dp,
-                            // 第 0 段是模块名，不对应任何页面；第 i 段对应面包屑第 i-1 层。
+                            // 第 0 段是模块名，不对应任何页面；第 i 段对应可见页面里的第 i-1 个。
                             clickableFrom = 1,
-                            onCrumbClick = if (crumbTrail.size > 1) { index ->
-                                vm.jumpToCrumb(index - 1)
+                            onCrumbClick = if (visibleIndices.size > 1) { index ->
+                                // 跳层要按「在栈里的真实下标」算，跳过虚拟页后两者不再相等。
+                                vm.jumpToCrumb(visibleIndices[index - 1])
                             } else null
                         )
                     }

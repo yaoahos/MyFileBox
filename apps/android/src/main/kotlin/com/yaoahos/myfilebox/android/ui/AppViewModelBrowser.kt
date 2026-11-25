@@ -4,6 +4,7 @@ import com.yaoahos.myfilebox.core.MODULE_LABEL_LOCAL
 import com.yaoahos.myfilebox.core.MODULE_LABEL_NET
 import com.yaoahos.myfilebox.core.MODULE_LABEL_SYNO
 import com.yaoahos.myfilebox.core.STORAGE_ROOT_LABEL
+import com.yaoahos.myfilebox.core.ancestorLevels
 import com.yaoahos.myfilebox.core.displayLeaf
 import android.app.Application
 import android.content.ClipData
@@ -385,16 +386,18 @@ internal fun AppViewModel.openLocalFolderPath(path: String, title: String) {
         }
         val atRoot = path.trimEnd('/') == rootPath
         val pageTitle = if (atRoot) STORAGE_ROOT_LABEL else title
-        pushBrowser(
-            BrowserState(
-                title = pageTitle,
-                // 面包屑第一层是模块名，这里同步用它，避免 path 与面包屑两套叫法。
-                path = "$MODULE_LABEL_LOCAL / $pageTitle",
-                ctx = FileContext.LOCAL,
-                items = emptyList(),
-                location = path
-            )
+        val next = BrowserState(
+            title = pageTitle,
+            // 面包屑第一层是模块名，这里同步用它，避免 path 与面包屑两套叫法。
+            path = "$MODULE_LABEL_LOCAL / $pageTitle",
+            ctx = FileContext.LOCAL,
+            items = emptyList(),
+            location = path
         )
+        // 从收藏点进目录：返回栈按真实路径补上层页，面包屑才会显示「DCIM › Camera」，
+        // 而不是把目录挂在「收藏」下面。
+        val origin = state.browser
+        pushBrowser(next, if (origin?.isVirtualPage() == true) stackForJumpFromVirtual(origin, next) else null)
         state = state.copy(loading = true)
         viewModelScope.launch {
             val items = withContext(Dispatchers.IO) { local.list(path) }
@@ -734,7 +737,11 @@ internal fun AppViewModel.openFolder(entry: FileEntry) {
                 // 带着它进子目录会出两处错：删除/刷新走 reloadBrowserItems 的收藏分支，
                 // 把列表换回收藏首页内容（看起来像多出同名文件夹、又像退出当前路径）；
                 // browserIsVirtual() 也会把子目录当虚拟页，粘贴与新建被禁用。
-                pushBrowser(browser.copy(title = entry.name, path = "${browser.path} / ${entry.name}", items = emptyList(), location = entry.path, favorites = false))
+                //
+                // 从收藏进来时返回栈按真实路径补上层页：面包屑要显示文件真正在哪，
+                // 不能显示成「收藏 › 目录名」。
+                val nextSyno = browser.copy(title = entry.name, path = "${browser.path} / ${entry.name}", items = emptyList(), location = entry.path, favorites = false)
+                pushBrowser(nextSyno, stackForJumpFromVirtual(browser, nextSyno))
                 // 点目录这一刻先查一次网络：系统回调常常迟到，不该让用户先对着空白页等。
                 detectNetworkSwitchNow()
                 // 端点还指着刚离开的局域网时，接下来必然要先重建通道（命中中继缓存 1~2 秒，
@@ -814,8 +821,9 @@ internal fun AppViewModel.openFolder(entry: FileEntry) {
                 val connection = state.connections.firstOrNull { it.id == browser.netId } ?: return
                 val previous = state.browser
                 val previousStack = state.browserStack
-                // 同群晖：真实目录不能继承收藏页的虚拟标记。
-                pushBrowser(browser.copy(title = entry.name, path = "${browser.path} / ${entry.name}", items = emptyList(), location = entry.path, favorites = false))
+                // 同群晖：真实目录不能继承收藏页的虚拟标记，返回栈按真实路径补层级。
+                val nextNet = browser.copy(title = entry.name, path = "${browser.path} / ${entry.name}", items = emptyList(), location = entry.path, favorites = false)
+                pushBrowser(nextNet, stackForJumpFromVirtual(browser, nextNet))
                 state = state.copy(loading = true, connectHint = false)
                 detectNetworkSwitchNow()
                 armNetTimeoutHint(entry.path)
@@ -843,7 +851,7 @@ internal fun AppViewModel.openFolder(entry: FileEntry) {
     }
 
 
-internal fun AppViewModel.pushBrowser(next: BrowserState) {
+internal fun AppViewModel.pushBrowser(next: BrowserState, stackOverride: List<BrowserState>? = null) {
         val current = state.browser
         val tab = when (next.ctx) {
             FileContext.LOCAL -> TabKey.LOCAL
@@ -853,7 +861,8 @@ internal fun AppViewModel.pushBrowser(next: BrowserState) {
         // 进目录是用户导航：进行中的「定位目标文件夹」要作废。
         state = state.copy(
             browser = next.copy(grid = viewMode(tab) == "grid"),
-            browserStack = if (current != null) state.browserStack + current else state.browserStack,
+            browserStack = stackOverride
+                ?: if (current != null) state.browserStack + current else state.browserStack,
             selected = emptySet(), selectionActive = false,
             // 进入新目录意味着换了「当前位置」，上一处的筛选词不能跟过来。
             nameFilter = "",
@@ -861,6 +870,61 @@ internal fun AppViewModel.pushBrowser(next: BrowserState) {
             navDir = 1
         )
     }
+
+
+/**
+ * 从虚拟页（收藏）跳进真实目录时的返回栈。
+ *
+ * 收藏页是集合快照，不是目录：它入栈后面包屑就成了「收藏 › 目标名」，目标文件
+ * 实际在 /photo/2026 下，用户看到的层级是错的。这里改成——
+ *   · 收藏页留在栈底，按返回仍然回到收藏；
+ *   · 中间按目标目录的真实路径补出上层页（items 留空，回到那一层时再加载）；
+ *   · 面包屑跳过虚拟页（见 BrowserScreen），于是显示的是真实位置。
+ *
+ * 不是虚拟页时返回 null，走默认的「当前页入栈」。
+ */
+private fun AppViewModel.stackForJumpFromVirtual(origin: BrowserState, target: BrowserState): List<BrowserState>? {
+    if (!origin.isVirtualPage()) return null
+    return state.browserStack + origin + pathAncestorPages(target.ctx, target.netId, target.location)
+}
+
+/**
+ * 目标目录的真实上层页（最外层在前）。
+ *
+ * 每一页都只填 title / path / location：列表等回到那一层再加载，
+ * 和传输记录跳转（[enterTransferFolder]）同一套做法。
+ */
+internal fun AppViewModel.pathAncestorPages(ctx: FileContext, netId: String?, location: String): List<BrowserState> {
+    val base = when (ctx) {
+        FileContext.LOCAL -> state.localRoot
+        FileContext.SYNO -> ""
+        FileContext.NET -> state.connections.firstOrNull { it.id == netId }?.path.orEmpty()
+    }
+    val levels = ancestorLevels(location, base)
+    if (levels.isEmpty()) return emptyList()
+    val tab = when (ctx) {
+        FileContext.LOCAL -> TabKey.LOCAL
+        FileContext.SYNO -> TabKey.SYNO
+        FileContext.NET -> TabKey.NET
+    }
+    val grid = viewMode(tab) == "grid"
+    val moduleLabel = when (ctx) {
+        FileContext.LOCAL -> MODULE_LABEL_LOCAL
+        FileContext.SYNO -> MODULE_LABEL_SYNO
+        FileContext.NET -> MODULE_LABEL_NET
+    }
+    return levels.mapIndexed { index, level ->
+        BrowserState(
+            title = level.name,
+            path = (listOf(moduleLabel) + levels.take(index + 1).map { it.name }).joinToString(" / "),
+            ctx = ctx,
+            items = emptyList(),
+            grid = grid,
+            netId = netId,
+            location = level.path
+        )
+    }
+}
 
 
 internal fun AppViewModel.backFromBrowser() {
@@ -920,6 +984,16 @@ internal fun AppViewModel.jumpToCrumb(index: Int) {
             // 面包屑往根走 = 返回动画，往深走 = 前进动画。
             navDir = if (index >= trail.size - 1) 1 else -1
         )
+        // 收藏页跳进目录时按真实路径补出来的上层是「空页」（items 留空），
+        // 跳到这一层要补一次加载，否则停在一屏空白上看着像空目录。
+        if (target.items.isEmpty() && !target.isVirtualPage()) {
+            state = state.copy(loading = true)
+            browserLoadJob?.cancel()
+            browserLoadJob = viewModelScope.launch {
+                reloadBrowserItems()
+                if (state.browser?.location == target.location) state = state.copy(loading = false)
+            }
+        }
     }
 
 
