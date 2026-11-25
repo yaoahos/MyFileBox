@@ -171,17 +171,61 @@ class NetErrorsTest {
     fun `device notice reports airplane mode even while wifi stays on`() {
         // 用户实测漏掉的正是这一格：飞行模式开着、WiFi 单独打开时 activeNetwork 还在，
         // 旧的 offlineNotice 返回 null，界面一句话都没有。
+        // 文案要说明「网络其实还能用」，否则用户会被指去关飞行模式。
         assertEquals(
-            "飞行模式已开启，请关闭后重试",
+            "飞行模式已开启，当前仅 Wi-Fi 可用",
             networkStatusNotice(DeviceNet.LAN, airplane = true)
         )
     }
 
     @Test
-    fun `device notice reports airplane mode with no active network`() {
+    fun `airplane mode with wifi that cannot reach the internet`() {
         assertEquals(
-            "飞行模式已开启，请关闭后重试",
+            "飞行模式已开启，当前 Wi-Fi 无法上网，内网仍可访问",
+            networkStatusNotice(DeviceNet.LAN_NO_INTERNET, airplane = true)
+        )
+    }
+
+    @Test
+    fun `airplane mode with only mobile data on`() {
+        assertEquals(
+            "飞行模式已开启，当前仅移动数据可用",
+            networkStatusNotice(DeviceNet.CELLULAR, airplane = true)
+        )
+    }
+
+    @Test
+    fun `device notice reports airplane mode with no active network`() {
+        // 两路网络都被飞行模式关掉：这时才该让用户去关飞行模式。
+        assertEquals(
+            "飞行模式已开启，网络已全部关闭",
             networkStatusNotice(DeviceNet.OFFLINE, airplane = true)
+        )
+    }
+
+    @Test
+    fun `airplane mode with wifi switched on but not connected yet`() {
+        // 打开 Wi-Fi 但还没连上 AP：要做的是连一个网络，不是关飞行模式。
+        assertEquals(
+            "飞行模式已开启，Wi-Fi 已打开但未连接网络",
+            networkStatusNotice(DeviceNet.OFFLINE, airplane = true, wifiOn = true)
+        )
+    }
+
+    @Test
+    fun `airplane mode with mobile data switched on but not connected yet`() {
+        assertEquals(
+            "飞行模式已开启，移动数据已打开但未连接网络",
+            networkStatusNotice(DeviceNet.OFFLINE, airplane = true, dataOn = true)
+        )
+    }
+
+    @Test
+    fun `wifi switched on wins over mobile data when both are on`() {
+        // 两个开关都开着但都没连上：优先说 Wi-Fi，这台设备上它更可能是用户刚动的那个。
+        assertEquals(
+            "飞行模式已开启，Wi-Fi 已打开但未连接网络",
+            networkStatusNotice(DeviceNet.OFFLINE, airplane = true, wifiOn = true, dataOn = true)
         )
     }
 
@@ -212,5 +256,24 @@ class NetErrorsTest {
         // 飞行模式下手动开 WiFi 连内网 NAS 是合法场景：说明行要有，但请求不能被拦。
         assertTrue(offlineNetworkMessage(DeviceNet.LAN) == null)
         assertTrue(offlineNetworkMessage(DeviceNet.LAN_NO_INTERNET) == null)
+        assertTrue(offlineNetworkMessage(DeviceNet.CELLULAR) == null)
+    }
+
+    @Test
+    fun `fast failure message distinguishes airplane mode from switched off networks`() {
+        // 完全没有可用网络时，这句同样要说清是「全关」还是「打开了某一路但没连上」，
+        // 否则请求被提前拦下后，用户还是不知道该动哪儿。
+        assertEquals(
+            "飞行模式已开启，网络已全部关闭",
+            offlineNetworkMessage(DeviceNet.OFFLINE, airplane = true)
+        )
+        assertEquals(
+            "飞行模式已开启，Wi-Fi 已打开但未连接网络",
+            offlineNetworkMessage(DeviceNet.OFFLINE, airplane = true, wifiOn = true)
+        )
+        assertEquals(
+            "手机未联网，请打开 WiFi 或移动数据",
+            offlineNetworkMessage(DeviceNet.OFFLINE, airplane = false)
+        )
     }
 }

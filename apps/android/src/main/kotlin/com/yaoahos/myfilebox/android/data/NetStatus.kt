@@ -95,6 +95,36 @@ object NetStatus {
             Settings.Global.getInt(context.contentResolver, Settings.Global.AIRPLANE_MODE_ON, 0) == 1
         }.getOrDefault(false)
     }
+
+    /**
+     * Wi-Fi 开关是否打开（不代表已连上某个网络）。
+     *
+     * 飞行模式会把 Wi-Fi 关掉，但用户可以再单独打开——这时手机可能还没连上任何 AP，
+     * `current()` 依然是 OFFLINE。提示语要把这两种情况分开：
+     * 「网络已全部关闭」要做的是关飞行模式，而「Wi-Fi 已打开但未连接」要做的是连一个网络。
+     *
+     * 读 `Settings.Global.WIFI_ON` 而不是 `WifiManager.isWifiEnabled()`：后者在部分 ROM 上
+     * 要 ACCESS_WIFI_STATE，且 Android 10 起接口行为被收紧。
+     *
+     * 取值是位标志：1 = 站点（能连 AP），2 = 热点，3 = 两者。**只看 bit0**——
+     * 真机上就遇到过 `wifi_on=2`（只开了个人热点、Wi-Fi 上网其实是关的），
+     * 用 `!= 0` 会把它当成「Wi-Fi 已打开」，提示语就把用户引到错的方向。
+     */
+    fun wifiEnabled(): Boolean {
+        val context = appContext ?: return false
+        return runCatching {
+            (Settings.Global.getInt(context.contentResolver, Settings.Global.WIFI_ON, 0) and 1) != 0
+        }.getOrDefault(false)
+    }
+
+    /** 移动数据的开关状态（同样不等于已连上，飞行模式下可单独打开）。 */
+    fun mobileDataEnabled(): Boolean {
+        val context = appContext ?: return false
+        return runCatching {
+            // 键名没有公开常量（Settings.Global.MOBILE_DATA 未对第三方开放），沿用系统实际值。
+            Settings.Global.getInt(context.contentResolver, "mobile_data", 0) != 0
+        }.getOrDefault(false)
+    }
 }
 
 /**

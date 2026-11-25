@@ -60,8 +60,11 @@ fun friendlyNetError(
 
         // ---- 设备侧：没网 / 走错网络 ----
         // UNKNOWN 不参与判断：拿不到系统状态时不能替用户下「你没网」的结论。
-        device == DeviceNet.OFFLINE ->
-            offlineMessage(NetStatus.airplaneModeOn())
+        device == DeviceNet.OFFLINE -> offlineMessage(
+            NetStatus.airplaneModeOn(),
+            NetStatus.wifiEnabled(),
+            NetStatus.mobileDataEnabled()
+        )
 
         // 内网地址 + 只有移动数据：地址没错、服务器也没错，缺的是同一个 Wi-Fi。
         device == DeviceNet.CELLULAR && hostIsPrivate(host) ->
@@ -155,14 +158,45 @@ fun friendlyNetError(
  * 设备完全没有网络时的那句话；有网时返回 null（调用方据此决定是否覆盖原有提示）。
  *
  * 界面也会用它：点下连接的那一刻就能确定结论，没必要让用户先对着转圈等 socket 超时。
+ *
+ * [wifiOn] / [dataOn] 只在「飞行模式 + 完全没有可用网络」时用来把话说细：
+ * 飞行模式确实会把两路网络都关掉，但用户可以再单独打开 Wi-Fi（或移动数据）——
+ * 打开了却没连上 AP，和两路都关着，要用户做的事完全不一样。
  */
-fun offlineNetworkMessage(device: DeviceNet = NetStatus.current()): String? =
-    if (device == DeviceNet.OFFLINE) offlineMessage(NetStatus.airplaneModeOn()) else null
+fun offlineNetworkMessage(
+    device: DeviceNet = NetStatus.current(),
+    airplane: Boolean = NetStatus.airplaneModeOn(),
+    wifiOn: Boolean = NetStatus.wifiEnabled(),
+    dataOn: Boolean = NetStatus.mobileDataEnabled()
+): String? =
+    if (device == DeviceNet.OFFLINE) offlineMessage(airplane, wifiOn, dataOn) else null
 
-private fun offlineMessage(airplane: Boolean): String = if (airplane) {
-    "飞行模式已开启，请关闭后重试"
+private fun offlineMessage(airplane: Boolean, wifiOn: Boolean, dataOn: Boolean): String = if (airplane) {
+    airplaneMessage(DeviceNet.OFFLINE, wifiOn, dataOn)
 } else {
     "手机未联网，请打开 WiFi 或移动数据"
+}
+
+/**
+ * 飞行模式开着时的说明。
+ *
+ * 必须区分三种情况，否则用户会被指到错的方向：
+ * ① 两路网络都被飞行模式关掉 —— 要做的是关飞行模式；
+ * ② 用户单独打开了 Wi-Fi（或移动数据）并已连上 —— 网络其实能用，关飞行模式不是必须的；
+ * ③ 单独打开了开关但还没连上（无 AP / 无信号）—— 要做的是连一个网络。
+ *
+ * [DeviceNet] 已经能区分「连着 Wi-Fi」「连着移动数据」，剩下的 ③ 靠开关状态判断。
+ */
+private fun airplaneMessage(device: DeviceNet, wifiOn: Boolean, dataOn: Boolean): String = when (device) {
+    DeviceNet.LAN -> "飞行模式已开启，当前仅 Wi-Fi 可用"
+    DeviceNet.LAN_NO_INTERNET -> "飞行模式已开启，当前 Wi-Fi 无法上网，内网仍可访问"
+    DeviceNet.CELLULAR -> "飞行模式已开启，当前仅移动数据可用"
+    DeviceNet.OTHER -> "飞行模式已开启，当前仍有网络连接"
+    else -> when {
+        wifiOn -> "飞行模式已开启，Wi-Fi 已打开但未连接网络"
+        dataOn -> "飞行模式已开启，移动数据已打开但未连接网络"
+        else -> "飞行模式已开启，网络已全部关闭"
+    }
 }
 
 /**
@@ -173,16 +207,18 @@ private fun offlineMessage(airplane: Boolean): String = if (airplane) {
  * - 这里还要覆盖两种「有网络对象但其实上不了公网」的情况：飞行模式下把 WiFi
  *   单独打开（activeNetwork 仍在，系统判 LAN / LAN_NO_INTERNET）、以及 WiFi 连着
  *   却通不了外网。此时内网 NAS 照样可达，绝不能拦请求，但界面必须说清状态——
- *   否则用户看到的是过期的「● 在线」卡片和一句「连接超时」，完全不知道要关飞行模式。
+ *   否则用户看到的是过期的「● 在线」卡片和一句「连接超时」。
  *
- * [airplane] 单独入参是为了让这条判断在单元测试里可确定地覆盖（不依赖 Application）。
+ * [airplane] 与两个开关单独入参是为了让这条判断在单元测试里可确定地覆盖（不依赖 Application）。
  */
 fun networkStatusNotice(
     device: DeviceNet = NetStatus.current(),
-    airplane: Boolean = NetStatus.airplaneModeOn()
+    airplane: Boolean = NetStatus.airplaneModeOn(),
+    wifiOn: Boolean = NetStatus.wifiEnabled(),
+    dataOn: Boolean = NetStatus.mobileDataEnabled()
 ): String? = when {
-    device == DeviceNet.OFFLINE -> offlineMessage(airplane)
-    airplane -> "飞行模式已开启，请关闭后重试"
+    airplane -> airplaneMessage(device, wifiOn, dataOn)
+    device == DeviceNet.OFFLINE -> offlineMessage(airplane = false, wifiOn = wifiOn, dataOn = dataOn)
     device == DeviceNet.LAN_NO_INTERNET -> "当前 WiFi 无法上网，内网仍可访问"
     else -> null
 }
