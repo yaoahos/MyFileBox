@@ -155,6 +155,7 @@ import com.yaoahos.myfilebox.core.NetworkConnection
 import com.yaoahos.myfilebox.core.Session
 import com.yaoahos.myfilebox.core.TabKey
 import com.yaoahos.myfilebox.core.Volume
+import com.yaoahos.myfilebox.core.connectionAddressLabel
 import kotlin.math.abs
 import com.yaoahos.myfilebox.android.ui.theme.semanticColors
 
@@ -288,20 +289,6 @@ internal fun NetHome(state: MyFileBoxState, vm: AppViewModel) {
                 }
             }
         )
-    }
-}
-
-/** 统一的连接地址显示：每种协议有固定格式，末尾不带多余斜杠。 */
-private fun connectionAddressLabel(c: NetworkConnection): String {
-    val p = c.path.trim().let { if (it.startsWith("/")) it else if (it.isBlank()) "" else "/$it" }.trimEnd('/')
-    return when (c.protocol.uppercase()) {
-        "SMB" -> "\\\\${c.host}\\${p.trimStart('/')}".trimEnd('\\')
-        "SFTP" -> "sftp://${c.host}:${c.port}$p"
-        "FTP" -> "ftp://${c.host}:${c.port}$p"
-        else -> {
-            val scheme = if (c.secure || c.port == 443) "https" else "http"
-            "$scheme://${c.host}:${c.port}$p"
-        }
     }
 }
 

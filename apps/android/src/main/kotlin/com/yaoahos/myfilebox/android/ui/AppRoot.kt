@@ -113,6 +113,7 @@ import java.io.File
 import com.yaoahos.myfilebox.core.ThemeMode
 import com.yaoahos.myfilebox.core.TabKey
 import com.yaoahos.myfilebox.core.effectiveDefaultTab
+import com.yaoahos.myfilebox.core.remoteFullPath
 import com.yaoahos.myfilebox.android.ui.theme.semanticColors
 
 @Composable
@@ -646,6 +647,15 @@ private fun FileDetailDialog(file: FileEntry, vm: AppViewModel, onDismiss: () ->
     // 弹窗是独立窗口，页面顶部的「已复制」提示会被挡在弹窗下方看不见。
     // 复制反馈放在弹窗内部（标题旁），几秒后自动消失。
     var copied by remember { mutableStateOf(false) }
+    // 网络文件的「完整路径」要带协议和主机：SMB / FTP / SFTP 的 FileEntry.path 只有
+    // 相对路径（SMB 连主机名都没有），照原样显示既看不出是哪台机器，复制出去也用不了。
+    val browser = vm.state.browser
+    val netConnection = vm.state.connections.firstOrNull { it.id == browser?.netId }
+    val fullPath = if (browser?.ctx == FileContext.NET) {
+        remoteFullPath(file.path, netConnection)
+    } else {
+        file.path
+    }
     LaunchedEffect(copied) {
         if (copied) {
             delay(1600)
@@ -686,8 +696,8 @@ private fun FileDetailDialog(file: FileEntry, vm: AppViewModel, onDismiss: () ->
                 DetailRow("修改时间", if (file.modified > 0) LocalRepository.formatFull(file.modified) else file.timeLabel.ifBlank { "—" })
                 DetailRow("所在位置", file.folder.ifBlank { "内部存储" })
                 // 路径行整行可点：复制反馈在弹窗内给（顶部提示会被弹窗挡住）。
-                DetailRow("完整路径", file.path, onClick = {
-                    vm.copyToClipboard(file.path, "路径")
+                DetailRow("完整路径", fullPath, onClick = {
+                    vm.copyToClipboard(fullPath, "路径")
                     copied = true
                 })
                 HorizontalDivider(
