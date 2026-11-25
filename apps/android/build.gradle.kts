@@ -45,8 +45,8 @@ android {
         // 但本项目通过 GitHub Release 分发，不受 Play 政策约束；本机 SDK 也只装了 35。
         // 升 36 会触发 Android 16 的 edge-to-edge / FGS 行为变更，留到发版前专项适配。
         targetSdk = 35
-        versionCode = 6
-        versionName = "1.1.4"
+        versionCode = 7
+        versionName = "1.1.5"
         // 调试包在「设置 → 关于」里也标出来，避免和正式版看混。
         if (debugBuild) versionNameSuffix = "-debug"
         // 应用显示名：默认走资源，调试包用独立名字，桌面上两个图标一眼可分。
