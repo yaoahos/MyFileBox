@@ -1701,6 +1701,13 @@ internal fun AppViewModel.openFavorites(ctx: FileContext = FileContext.LOCAL) {
             screen = Screen.MAIN,
             screenStack = if (origin == Screen.MAIN) state.screenStack else state.screenStack + origin
         )
+        // 已经站在同一栏的收藏页：就地刷新，不再叠一层。
+        // 叠了的话栈里会出现两个一模一样的页面，返回要按两次才动，方向也会错乱。
+        val current = state.browser
+        if (current?.favorites == true && current.ctx == ctx) {
+            state = state.copy(browser = current.copy(items = files))
+            return
+        }
         pushBrowser(
             BrowserState(
                 title = "收藏",

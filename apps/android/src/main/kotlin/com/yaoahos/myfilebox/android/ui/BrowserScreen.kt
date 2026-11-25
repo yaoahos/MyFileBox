@@ -150,14 +150,22 @@ internal fun isRestrictedSystemDir(path: String, ownPackage: String): Boolean {
 /**
  * 面包屑要显示的页面下标（相对返回栈）。
  *
- * 收藏、图片、视频、最近这些是集合快照，不是目录：留在栈里是为了「返回」能回到它们，
- * 但不该出现在面包屑上——否则从收藏点进 /photo/2026/旅行 会显示成「收藏 › 2026 › 旅行」。
- * 当前页本身是虚拟页时仍要显示，不然停在收藏页就只剩一个模块名。
+ * 收藏、图片、视频、最近这些是集合快照，是**顶层入口**而不是当前目录的子页：
+ *   · 站在收藏页上时，面包屑只显示「模块名 › 收藏」——之前走过的目录一律不显示，
+ *     否则在 Temp 里点开收藏会变成「… › Temp › 收藏」，看着像收藏是 Temp 的子目录；
+ *   · 从收藏点进某个目录时，只显示目标目录的真实层级，收藏本身不进面包屑；
+ *   · 普通目录链一层都不丢。
  */
-internal fun breadcrumbIndices(trail: List<BrowserState>): List<Int> =
-    trail.indices.filter { index ->
-        index == trail.lastIndex || !trail[index].isVirtualPage()
+internal fun breadcrumbIndices(trail: List<BrowserState>): List<Int> {
+    if (trail.isEmpty()) return emptyList()
+    val boundary = trail.indexOfLast { it.isVirtualPage() }
+    if (boundary < 0) return trail.indices.toList()
+    return if (boundary == trail.lastIndex) {
+        listOf(boundary)
+    } else {
+        (boundary + 1..trail.lastIndex).toList()
     }
+}
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable

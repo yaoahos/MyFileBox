@@ -48,6 +48,24 @@ class BreadcrumbTest {
         assertEquals(listOf(0, 1, 2), breadcrumbIndices(trail))
     }
 
+    /** 在 Temp 里点「收藏」：收藏是顶层入口，不能显示成 Temp 的子目录。 */
+    @Test
+    fun `在目录里打开收藏时面包屑只有收藏`() {
+        val trail = listOf(page("photo"), page("Temp"), page("收藏", favorites = true))
+        assertEquals(listOf(2), breadcrumbIndices(trail))
+    }
+
+    /** 收藏 → 目录 → 再收藏 → 再进目录：层级从最后一个收藏重新起算，不会一路累加。 */
+    @Test
+    fun `反复经收藏跳转不会把旧目录链带进面包屑`() {
+        val trail = listOf(
+            page("photo"), page("Temp"),
+            page("收藏", favorites = true),
+            page("photo"), page("Temp")
+        )
+        assertEquals(listOf(3, 4), breadcrumbIndices(trail))
+    }
+
     @Test
     fun `空栈不会越界`() {
         assertEquals(emptyList<Int>(), breadcrumbIndices(emptyList()))
