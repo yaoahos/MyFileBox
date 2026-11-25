@@ -332,12 +332,14 @@ internal fun HomeSelectionBar(state: MyFileBoxState, vm: AppViewModel, modifier:
     var showRename by remember { mutableStateOf(false) }
     var compressDefaultName by remember { mutableStateOf("压缩包") }
     // 与浏览页完全同一套动作：复制 / 移动 / 删除 / 更多。
+    // 取消全选后仍停在这个模式里，没有选中项时整栏置灰、不可点。
+    val hasSelection = state.homeSelected.isNotEmpty()
     SelectionActionBar(
         actions = listOf(
-            SelectionAction(Icons.Outlined.ContentCopy, "复制") { vm.stageHomeClipboard(false) },
-            SelectionAction(Icons.Outlined.DriveFileMove, "移动") { vm.stageHomeClipboard(true) },
-            SelectionAction(Icons.Outlined.Delete, "删除", danger = true) { vm.deleteHomeSelection() },
-            SelectionAction(Icons.Outlined.MoreHoriz, "更多") { showMore = true }
+            SelectionAction(Icons.Outlined.ContentCopy, "复制", enabled = hasSelection) { vm.stageHomeClipboard(false) },
+            SelectionAction(Icons.Outlined.DriveFileMove, "移动", enabled = hasSelection) { vm.stageHomeClipboard(true) },
+            SelectionAction(Icons.Outlined.Delete, "删除", enabled = hasSelection, danger = true) { vm.deleteHomeSelection() },
+            SelectionAction(Icons.Outlined.MoreHoriz, "更多", enabled = hasSelection) { showMore = true }
         ),
         modifier = modifier
     )

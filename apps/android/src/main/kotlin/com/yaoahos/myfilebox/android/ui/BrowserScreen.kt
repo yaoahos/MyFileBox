@@ -61,6 +61,7 @@ import androidx.compose.material.icons.outlined.DriveFileMove
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.FolderZip
+import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.material.icons.outlined.GridView
 import androidx.compose.material.icons.outlined.MoreHoriz
@@ -110,6 +111,7 @@ import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -122,6 +124,28 @@ import com.yaoahos.myfilebox.core.MODULE_LABEL_LOCAL
 import com.yaoahos.myfilebox.core.MODULE_LABEL_NET
 import com.yaoahos.myfilebox.core.MODULE_LABEL_SYNO
 import java.io.File
+
+/**
+ * 是否是 Android 11+ 的「其它应用不可读」区域（`Android/data`、`Android/obb`）。
+ *
+ * 这两个目录按包隔离：即便给了「所有文件访问权限」，也只能读自己那一份，
+ * 其它应用的目录 `listFiles()` 直接是空的。系统「文件管理」是特权应用，所以那边看得到——
+ * 空列表不是本应用漏读，别再用「这个文件夹是空的」误导用户。
+ *
+ * 自己包名下的子目录排除掉：那里读得到，真空就是真空。
+ */
+internal fun isRestrictedSystemDir(path: String, ownPackage: String): Boolean {
+    if (path.isBlank()) return false
+    val p = path.replace('\\', '/').trimEnd('/')
+    // 自己的包名必须按路径段比较：`com.x` 是 `com.x.debug` 的前缀，
+    // 用 contains 会把调试包的目录当成「自己的」而不给提示。
+    if (p.endsWith("/Android/data/$ownPackage") || p.contains("/Android/data/$ownPackage/") ||
+        p.endsWith("/Android/obb/$ownPackage") || p.contains("/Android/obb/$ownPackage/")
+    ) {
+        return false
+    }
+    return p.contains("/Android/data") || p.contains("/Android/obb")
+}
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
@@ -434,6 +458,8 @@ fun BrowserScreen(state: MyFileBoxState, vm: AppViewModel) {
             Box(Modifier.weight(1f)) {
                 if (shownItems.isEmpty() && !state.loading) {
                     val readFailed = !state.localAccess && browser.ctx == FileContext.LOCAL
+                    val restrictedDir = browser.ctx == FileContext.LOCAL &&
+                        isRestrictedSystemDir(browser.location, LocalContext.current.packageName)
                     when {
                         filtering -> EmptyState(
                             icon = Icons.Outlined.Folder,
@@ -441,6 +467,13 @@ fun BrowserScreen(state: MyFileBoxState, vm: AppViewModel) {
                             message = filterSummary(state.nameFilter, state.extensionFilter),
                             actionLabel = "清除筛选",
                             onAction = vm::clearNameFilter
+                        )
+                        // 系统限制不是「空文件夹」：给错文案用户会以为文件丢了或应用读不了盘。
+                        restrictedDir -> EmptyState(
+                            icon = Icons.Outlined.Lock,
+                            title = "系统限制，无法读取",
+                            message = "Android 11 起，第三方应用只能读取自己的 Android/data、Android/obb 目录。" +
+                                "其它应用的数据请用系统「文件管理」查看。"
                         )
                         favoritesPage -> EmptyState(
                             icon = Icons.Outlined.StarBorder,
@@ -647,12 +680,14 @@ fun BrowserScreen(state: MyFileBoxState, vm: AppViewModel) {
 
         if (selecting) {
             // 底栏只放四个动作；全选在右上角，上传 / 分享 / 收藏等都收进「更多」。
+            // 取消全选后仍停在这个模式里（selectionActive），此时没有动作可做，整栏置灰。
+            val hasSelection = state.selected.isNotEmpty()
             SelectionActionBar(
                 actions = listOf(
-                    SelectionAction(Icons.Outlined.ContentCopy, "复制") { vm.stageSelectedTransfer(TransferMode.COPY) },
-                    SelectionAction(Icons.Outlined.DriveFileMove, "移动") { vm.stageSelectedTransfer(TransferMode.MOVE) },
-                    SelectionAction(Icons.Outlined.Delete, "删除", danger = true) { vm.deleteSelected() },
-                    SelectionAction(Icons.Outlined.MoreHoriz, "更多") { showMore = true }
+                    SelectionAction(Icons.Outlined.ContentCopy, "复制", enabled = hasSelection) { vm.stageSelectedTransfer(TransferMode.COPY) },
+                    SelectionAction(Icons.Outlined.DriveFileMove, "移动", enabled = hasSelection) { vm.stageSelectedTransfer(TransferMode.MOVE) },
+                    SelectionAction(Icons.Outlined.Delete, "删除", enabled = hasSelection, danger = true) { vm.deleteSelected() },
+                    SelectionAction(Icons.Outlined.MoreHoriz, "更多", enabled = hasSelection) { showMore = true }
                 ),
                 modifier = Modifier.align(Alignment.BottomCenter)
             )
