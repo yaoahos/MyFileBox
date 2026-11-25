@@ -925,23 +925,24 @@ internal fun parentStackFor(pages: List<BrowserState>, target: BrowserState): Li
 
 
 /**
- * 从虚拟页（收藏）跳进真实目录时的返回栈。
+ * 从虚拟页（收藏 / 图片 / 视频 / 最近）跳进真实目录时的返回栈。
  *
- * 收藏页是集合快照，不是目录：它入栈后面包屑就成了「收藏 › 目标名」，目标文件
- * 实际在 /photo/2026 下，用户看到的层级是错的。这里改成——
- *   · 收藏页作为新链的起点，按返回先回到收藏；
- *   · 中间按目标目录的真实路径补出上层页（items 留空，回到那一层时再加载）；
- *   · 面包屑跳过虚拟页（见 BrowserScreen），于是显示的是真实位置。
+ * 返回链与面包屑保持一致——屏幕上看到几层，返回就走几层：
+ *   · 虚拟页只作入口，**不进返回栈**（面包屑上本来也没有它，返回却要穿过它，
+ *     用户会觉得莫名其妙多一层）；
+ *   · 中间按目标目录的真实路径补出上层页（items 留空，回到那一层时再加载）。
  *
- * 收藏之前的目录历史**不再带进来**：虚拟页是顶层入口，每进一次收藏就相当于换了一个
- * 起点。否则反复「目录 → 收藏 → 目录」，每一轮都把上一轮的目录再摞一遍，
- * 返回要按十几次才回得到首页。
+ * 于是从收藏里点开 `/photo/2026/Temp` 后，面包屑是「群晖文件 › photo › 2026 › Temp」，
+ * 返回依次是 2026 → photo → 首页，正好把面包屑倒着走一遍。
+ *
+ * 收藏之前的目录历史同样不带进来：虚拟页是顶层入口，每进一次相当于换了一个起点，
+ * 否则反复「目录 → 收藏 → 目录」会把上一轮的目录再摞一遍。
  *
  * 不是虚拟页时返回 null，走默认的「当前页入栈」。
  */
 private fun AppViewModel.stackForJumpFromVirtual(origin: BrowserState, target: BrowserState): List<BrowserState>? {
     if (!origin.isVirtualPage()) return null
-    return listOf(origin) + pathAncestorPages(target.ctx, target.netId, target.location)
+    return pathAncestorPages(target.ctx, target.netId, target.location)
 }
 
 /** 这一端的根：本地是存储根，群晖从共享名算起，网络位置是连接里填的起始路径。 */
