@@ -203,11 +203,15 @@ internal fun SynoHome(state: MyFileBoxState, vm: AppViewModel, onVolume: () -> U
         )
         // 群晖首页原来也没有设备状态说明：飞行模式下 WiFi 单独打开时，用户只看到
         // 过期的共享列表，连不上还要等满超时。这一行只说状态，不拦内网请求。
-        DeviceNoticeRow(vm.networkNotice())
+        val deviceNotice = vm.networkNotice()
+        DeviceNoticeRow(deviceNotice)
         // 进共享文件夹要先重新解析通道再登录，切网后实测 7~8 秒；这段时间首页原本
         // 毫无变化，用户只能反复点。openShare 会在 1 秒没结果时挂上 connectHint，
         // 这里把它说出来，并给一个能点的重试。
-        if (state.connectHint) {
+        //
+        // 设备状态已经在上面的常驻行说清时不再挂这条：两行同一句话，用户看到的是
+        // 「飞行模式已开启…」重复两遍；何况这种状态下点重试必然还是失败。
+        if (state.connectHint && deviceNotice == null) {
             ConnectHintBar(
                 state, vm,
                 waitingText = "正在连接群晖…",
@@ -431,8 +435,8 @@ internal fun ConnectHintBar(
             modifier = Modifier.size(15.dp)
         )
         Text(
-            // 设备状态压过一切：先让用户去解决唯一能解决的那件事。
-            vm.networkNotice() ?: if (state.loading) waitingText else failedText,
+            // 设备状态由调用方先过滤（非空时不显示本条），这里只谈请求本身。
+            if (state.loading) waitingText else failedText,
             fontSize = 12.sp,
             color = MaterialTheme.colorScheme.onSurface,
             maxLines = 2,

@@ -391,7 +391,9 @@ fun BrowserScreen(state: MyFileBoxState, vm: AppViewModel) {
             //   挂上又立刻消失只会闪一下，观感比没有更差；重建完仍读不回来，
             //   才切成「网络已变化，请刷新后重试」；
             // - 网络文件：连不上就是连不上 → 「连接超时，请检查网络」，不谈网络切换。
-            if (state.connectHint && !selecting && browser.ctx != FileContext.LOCAL) {
+            // 设备状态（飞行模式 / 没网）已经由页头常驻行说清时不再挂这条：
+            // 两行同一句话，看着像重复报错；这种状态下点重试也必然还是失败。
+            if (state.connectHint && deviceNotice == null && !selecting && browser.ctx != FileContext.LOCAL) {
                 val net = browser.ctx == FileContext.NET
                 Row(
                     Modifier
@@ -414,8 +416,6 @@ fun BrowserScreen(state: MyFileBoxState, vm: AppViewModel) {
                     )
                     Text(
                         when {
-                            // 没网压过一切：先让用户去解决唯一能解决的那件事。
-                            deviceNotice != null -> deviceNotice
                             // 挂上这条就说明已经等够了：再显示「正在连接…」等于把结论又咽回去。
                             net -> "连接超时"
                             state.loading -> "正在重新连接…"

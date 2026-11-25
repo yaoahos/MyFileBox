@@ -189,7 +189,10 @@ internal fun NetHome(state: MyFileBoxState, vm: AppViewModel) {
         )
         // 点卡片进目录期间卡片状态不动（在线就是在线的读操作），等待感全交给这条：
         // 1 秒没结果才挂，正常几十毫秒的连接根本不会出现。
-        if (state.connectHint) {
+        //
+        // 设备状态（飞行模式 / 没网）已由列表里那行常驻说明说清时不再挂这条：
+        // 两行同一句话会重复，且这种状态下点重试必然还是失败。
+        if (state.connectHint && vm.networkNotice() == null) {
             ConnectHintBar(
                 state, vm,
                 waitingText = "正在打开网络位置…",
