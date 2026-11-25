@@ -386,18 +386,24 @@ internal fun AppViewModel.openLocalFolderPath(path: String, title: String) {
         }
         val atRoot = path.trimEnd('/') == rootPath
         val pageTitle = if (atRoot) STORAGE_ROOT_LABEL else title
+        // 从收藏点进目录：返回栈按真实路径补上层页，面包屑才会显示「DCIM › Camera」，
+        // 而不是把目录挂在「收藏」下面。path 也换成真实层级——页面 key 由它构成，
+        // 同名收藏（两个「Temp」）靠它区分，否则会被当成同一个页面。
+        val origin = state.browser
+        val fromVirtual = origin?.isVirtualPage() == true
         val next = BrowserState(
             title = pageTitle,
             // 面包屑第一层是模块名，这里同步用它，避免 path 与面包屑两套叫法。
-            path = "$MODULE_LABEL_LOCAL / $pageTitle",
+            path = if (fromVirtual) {
+                jumpCrumbText(FileContext.LOCAL, null, path, pageTitle)
+            } else {
+                "$MODULE_LABEL_LOCAL / $pageTitle"
+            },
             ctx = FileContext.LOCAL,
             items = emptyList(),
             location = path
         )
-        // 从收藏点进目录：返回栈按真实路径补上层页，面包屑才会显示「DCIM › Camera」，
-        // 而不是把目录挂在「收藏」下面。
-        val origin = state.browser
-        pushBrowser(next, if (origin?.isVirtualPage() == true) stackForJumpFromVirtual(origin, next) else null)
+        pushBrowser(next, if (fromVirtual) stackForJumpFromVirtual(origin!!, next) else null)
         state = state.copy(loading = true)
         viewModelScope.launch {
             val items = withContext(Dispatchers.IO) { local.list(path) }
@@ -740,7 +746,18 @@ internal fun AppViewModel.openFolder(entry: FileEntry) {
                 //
                 // 从收藏进来时返回栈按真实路径补上层页：面包屑要显示文件真正在哪，
                 // 不能显示成「收藏 › 目录名」。
-                val nextSyno = browser.copy(title = entry.name, path = "${browser.path} / ${entry.name}", items = emptyList(), location = entry.path, favorites = false)
+                val nextSyno = browser.copy(
+                    title = entry.name,
+                    // 从收藏进来要按真实层级写 path：面包屑与页面 key 都取自它。
+                    path = if (browser.isVirtualPage()) {
+                        jumpCrumbText(FileContext.SYNO, browser.netId, entry.path, entry.name)
+                    } else {
+                        "${browser.path} / ${entry.name}"
+                    },
+                    items = emptyList(),
+                    location = entry.path,
+                    favorites = false
+                )
                 pushBrowser(nextSyno, stackForJumpFromVirtual(browser, nextSyno))
                 // 点目录这一刻先查一次网络：系统回调常常迟到，不该让用户先对着空白页等。
                 detectNetworkSwitchNow()
@@ -822,7 +839,17 @@ internal fun AppViewModel.openFolder(entry: FileEntry) {
                 val previous = state.browser
                 val previousStack = state.browserStack
                 // 同群晖：真实目录不能继承收藏页的虚拟标记，返回栈按真实路径补层级。
-                val nextNet = browser.copy(title = entry.name, path = "${browser.path} / ${entry.name}", items = emptyList(), location = entry.path, favorites = false)
+                val nextNet = browser.copy(
+                    title = entry.name,
+                    path = if (browser.isVirtualPage()) {
+                        jumpCrumbText(FileContext.NET, browser.netId, entry.path, entry.name)
+                    } else {
+                        "${browser.path} / ${entry.name}"
+                    },
+                    items = emptyList(),
+                    location = entry.path,
+                    favorites = false
+                )
                 pushBrowser(nextNet, stackForJumpFromVirtual(browser, nextNet))
                 state = state.copy(loading = true, connectHint = false)
                 detectNetworkSwitchNow()
@@ -858,6 +885,10 @@ internal fun AppViewModel.pushBrowser(next: BrowserState, stackOverride: List<Br
             FileContext.SYNO -> TabKey.SYNO
             FileContext.NET -> TabKey.NET
         }
+        // 跳进一串补出来的层级时，把整条 pageKey 链交给转场宿主重建页面栈。
+        // 少了这一步，返回父级时那个 key 从没进过栈，会被判成「前进」——画面从右边进，
+        // 而用户是按了返回，方向就反了。平时单页入栈仍交给宿主自己判断。
+        val chain = stackOverride?.let { override -> jumpPageChain(tab, override, next) }
         // 进目录是用户导航：进行中的「定位目标文件夹」要作废。
         state = state.copy(
             browser = next.copy(grid = viewMode(tab) == "grid"),
@@ -867,7 +898,9 @@ internal fun AppViewModel.pushBrowser(next: BrowserState, stackOverride: List<Br
             // 进入新目录意味着换了「当前位置」，上一处的筛选词不能跟过来。
             nameFilter = "",
             extensionFilter = "",
-            navDir = 1
+            navDir = 1,
+            // 链只在本次跳转用一次，宿主消费后清空；普通入栈顺手把残留清掉。
+            pendingPageChain = chain.orEmpty()
         )
     }
 
@@ -888,6 +921,33 @@ private fun AppViewModel.stackForJumpFromVirtual(origin: BrowserState, target: B
     return state.browserStack + origin + pathAncestorPages(target.ctx, target.netId, target.location)
 }
 
+/** 这一端的根：本地是存储根，群晖从共享名算起，网络位置是连接里填的起始路径。 */
+private fun AppViewModel.jumpBase(ctx: FileContext, netId: String?): String = when (ctx) {
+    FileContext.LOCAL -> state.localRoot
+    FileContext.SYNO -> ""
+    FileContext.NET -> state.connections.firstOrNull { it.id == netId }?.path.orEmpty()
+}
+
+/**
+ * 一次跳转的完整 pageKey 链：底栏首页 → 逐级页面 → 目标页。
+ *
+ * [stack] 是跳转后的返回栈（最外层在前），最后一个元素必须是 [target] 本身之外的父级。
+ * 转场宿主拿它重建页面栈（[PageStack.replaceChain]），于是「进去」是前进、
+ * 逐级「返回」都命中栈里的 key 判成返回——方向才不会反。
+ */
+internal fun jumpPageChain(tab: TabKey, stack: List<BrowserState>, target: BrowserState): List<String> =
+    buildList {
+        add("$PAGE_HOME${tab.name}")
+        stack.forEach { add(browserKeyOf(it)) }
+        add(browserKeyOf(target))
+    }
+
+private fun moduleLabelOf(ctx: FileContext): String = when (ctx) {
+    FileContext.LOCAL -> MODULE_LABEL_LOCAL
+    FileContext.SYNO -> MODULE_LABEL_SYNO
+    FileContext.NET -> MODULE_LABEL_NET
+}
+
 /**
  * 目标目录的真实上层页（最外层在前）。
  *
@@ -895,12 +955,7 @@ private fun AppViewModel.stackForJumpFromVirtual(origin: BrowserState, target: B
  * 和传输记录跳转（[enterTransferFolder]）同一套做法。
  */
 internal fun AppViewModel.pathAncestorPages(ctx: FileContext, netId: String?, location: String): List<BrowserState> {
-    val base = when (ctx) {
-        FileContext.LOCAL -> state.localRoot
-        FileContext.SYNO -> ""
-        FileContext.NET -> state.connections.firstOrNull { it.id == netId }?.path.orEmpty()
-    }
-    val levels = ancestorLevels(location, base)
+    val levels = ancestorLevels(location, jumpBase(ctx, netId))
     if (levels.isEmpty()) return emptyList()
     val tab = when (ctx) {
         FileContext.LOCAL -> TabKey.LOCAL
@@ -908,11 +963,7 @@ internal fun AppViewModel.pathAncestorPages(ctx: FileContext, netId: String?, lo
         FileContext.NET -> TabKey.NET
     }
     val grid = viewMode(tab) == "grid"
-    val moduleLabel = when (ctx) {
-        FileContext.LOCAL -> MODULE_LABEL_LOCAL
-        FileContext.SYNO -> MODULE_LABEL_SYNO
-        FileContext.NET -> MODULE_LABEL_NET
-    }
+    val moduleLabel = moduleLabelOf(ctx)
     return levels.mapIndexed { index, level ->
         BrowserState(
             title = level.name,
@@ -924,6 +975,23 @@ internal fun AppViewModel.pathAncestorPages(ctx: FileContext, netId: String?, lo
             location = level.path
         )
     }
+}
+
+/**
+ * 从虚拟页跳进目录时，目标页的 path：模块名 + 真实逐级目录 + 自身。
+ *
+ * path 参与页面 key（[browserKeyOf]），按真实层级写才不会让两个同名收藏
+ * （分别在不同目录下的「Temp」）算成同一个页面——那样返回会被判成「回到自己」。
+ */
+internal fun AppViewModel.jumpCrumbText(
+    ctx: FileContext,
+    netId: String?,
+    location: String,
+    fallbackLeaf: String
+): String {
+    val levels = ancestorLevels(location, jumpBase(ctx, netId))
+    val leaf = location.trim().trimEnd('/').substringAfterLast('/').ifBlank { fallbackLeaf }
+    return (listOf(moduleLabelOf(ctx)) + levels.map { it.name } + leaf).joinToString(" / ")
 }
 
 
