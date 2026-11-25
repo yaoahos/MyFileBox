@@ -103,26 +103,38 @@ object NetStatus {
      * `current()` 依然是 OFFLINE。提示语要把这两种情况分开：
      * 「网络已全部关闭」要做的是关飞行模式，而「Wi-Fi 已打开但未连接」要做的是连一个网络。
      *
-     * 读 `Settings.Global.WIFI_ON` 而不是 `WifiManager.isWifiEnabled()`：后者在部分 ROM 上
-     * 要 ACCESS_WIFI_STATE，且 Android 10 起接口行为被收紧。
+     * 读 `Settings.Global.WIFI_ON` 而不是 `WifiManager.isWifiEnabled()`：后者要
+     * ACCESS_WIFI_STATE（为一句提示再加权限不值得），且 Android 10 起接口被收紧。
      *
-     * 取值是位标志：1 = 站点（能连 AP），2 = 热点，3 = 两者。**只看 bit0**——
-     * 真机上就遇到过 `wifi_on=2`（只开了个人热点、Wi-Fi 上网其实是关的），
-     * 用 `!= 0` 会把它当成「Wi-Fi 已打开」，提示语就把用户引到错的方向。
+     * 取值只看「是否为 0」：AOSP 的 1/2/3 分别是「站点 / 热点 / 两者」，但真机上
+     * MIUI 在 Wi-Fi 已连上时也会写 2（K20Pro/A15 实测：`wifi_on=2` 且
+     * `cmd wifi status` 为 connected），按位判断会把「已打开」误判成「已关闭」。
      */
     fun wifiEnabled(): Boolean {
         val context = appContext ?: return false
         return runCatching {
-            (Settings.Global.getInt(context.contentResolver, Settings.Global.WIFI_ON, 0) and 1) != 0
+            Settings.Global.getInt(context.contentResolver, Settings.Global.WIFI_ON, 0) != 0
         }.getOrDefault(false)
     }
 
-    /** 移动数据的开关状态（同样不等于已连上，飞行模式下可单独打开）。 */
+    /**
+     * 移动数据的开关状态（同样不等于已连上，飞行模式下可单独打开）。
+     *
+     * 键名没有公开常量（`Settings.Global.MOBILE_DATA` 未对第三方开放）。以字符串读，
+     * 缺失时再退到按卡槽的 `mobile_data1/2`——部分 ROM 只写卡槽键，全局键不存在，
+     * 此时按 `getInt` 拿默认 0 会误判成「数据关着」。
+     */
     fun mobileDataEnabled(): Boolean {
         val context = appContext ?: return false
         return runCatching {
-            // 键名没有公开常量（Settings.Global.MOBILE_DATA 未对第三方开放），沿用系统实际值。
-            Settings.Global.getInt(context.contentResolver, "mobile_data", 0) != 0
+            val resolver = context.contentResolver
+            val global = Settings.Global.getString(resolver, "mobile_data")
+            if (global != null) {
+                global == "1"
+            } else {
+                Settings.Global.getString(resolver, "mobile_data1") == "1" ||
+                    Settings.Global.getString(resolver, "mobile_data2") == "1"
+            }
         }.getOrDefault(false)
     }
 }
